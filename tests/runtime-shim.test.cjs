@@ -3,11 +3,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { test } = require('node:test');
+const { promisify } = require('node:util');
+const nativeChildProcess = require('node:child_process');
 
-function LoadShim(tunSupport, accessAllowed = true) {
+function LoadShim(tunSupport, accessAllowed = true, realSubprocesses = false) {
   const handlers = new Map();
   const launches = [];
-  const childProcess = Object.fromEntries(
+  const childProcess = realSubprocesses ? { ...nativeChildProcess } : Object.fromEntries(
     ['spawn', 'spawnSync', 'execFile', 'execFileSync'].map(methodName => [
       methodName, function Launch(command, ...args) {
         const result = { methodName, command, args };
@@ -75,4 +77,22 @@ test('missing wrapper access denies TUN but preserves ordinary proxy startup', (
   assert.equal(shim.handlers.get('check-tun-service-available')().available, false);
   assert.equal(shim.handlers.get('start-clash-service-secure')({}, { tunMode: true }).success, false);
   assert.equal(shim.handlers.get('start-clash-service-secure')({}, { tunMode: false }), 'started');
+});
+
+test('promisified execFile preserves stdout, stderr, child handle, and error output', async () => {
+  const shim = LoadShim(false, true, true);
+  const RunFile = promisify(shim.childProcess.execFile);
+  const pending = RunFile(process.execPath, ['-e',
+    'process.stdout.write("scan output"); process.stderr.write("scan warning")']);
+  assert.ok(pending.child.pid);
+  const result = await pending;
+  assert.equal(result.stdout, 'scan output');
+  assert.equal(result.stderr, 'scan warning');
+  await assert.rejects(RunFile(process.execPath, ['-e',
+    'process.stdout.write("partial"); process.stderr.write("failure"); process.exit(2)']), error => {
+    assert.equal(error.code, 2);
+    assert.equal(error.stdout, 'partial');
+    assert.equal(error.stderr, 'failure');
+    return true;
+  });
 });

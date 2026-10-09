@@ -129,6 +129,14 @@ The ordinary package-check workflow runs for human pushes and PRs. GitHub's remo
 
 The Debian-based build froze during login on the development machine. The raw AppImage works as a normal user with `--no-sandbox`; the repackaged AppImage still needs the same manual usage test. Builds do not launch Electron. If it still freezes, try `ednovas-cloud --disable-gpu` to investigate graphics acceleration.
 
+For package integration diagnostics, close the app fully, then run the installed launcher as your normal user:
+
+```sh
+EDNOVAS_DEBUG=1 ELECTRON_ENABLE_LOGGING=1 ednovas-cloud --enable-logging=stderr 2>&1 | tee ednovas-cloud-debug.log
+```
+
+Lines prefixed `[EdNovas Nix]` show wrapper availability, subprocess begin/return/exit, and whether the main event loop remains responsive. The diagnostics omit subprocess arguments and IPC payloads; upstream logging can still include authentication tokens, so redact logs before sharing publicly. The shim redirects upstream's hardcoded `/bin/ps` process scan to the packaged `ps` on `PATH`.
+
 - Launch, sign in, load a subscription, and verify the tray and notifications on your desktop.
 - Test ordinary proxy traffic and switching nodes. On desktops without an applicable system proxy backend, use the app's local HTTP/SOCKS port in your browser or environment settings.
 - With the NixOS TUN module active and group membership refreshed, toggle TUN, verify its network interface and traffic, and confirm routing is restored when TUN stops.
