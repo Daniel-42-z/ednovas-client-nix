@@ -3,17 +3,12 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    home-manager = {
-      url = "github:nix-community/home-manager";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
   };
 
   outputs =
     {
       self,
       nixpkgs,
-      home-manager,
     }:
     let
       release = builtins.fromJSON (builtins.readFile ./nix/release.json);
@@ -38,7 +33,10 @@
           appPackage = pkgs.callPackage ./nix/package.nix { };
           updaterSource = pkgs.lib.fileset.toSource {
             root = ./scripts;
-            fileset = pkgs.lib.fileset.unions [ ./scripts/update.py ./scripts/appimage.py ];
+            fileset = pkgs.lib.fileset.unions [
+              ./scripts/update.py
+              ./scripts/appimage.py
+            ];
           };
           updater = pkgs.stdenvNoCC.mkDerivation {
             pname = "ednovas-update";
@@ -65,7 +63,7 @@
         in
         {
           ednovas-cloud = appPackage;
-          ednovas-cloud-tun = appPackage.override { tunSupport = true; };
+          ednovas-cloud-privileged-runtime = appPackage.override { privileged = true; };
           inherit updater;
           default = appPackage;
         }
@@ -84,7 +82,6 @@
       });
 
       nixosModules.default = import ./nix/modules/nixos.nix;
-      homeManagerModules.default = import ./nix/modules/home-manager.nix;
 
       checks = forAllSystems (
         system:
@@ -92,7 +89,6 @@
           inherit
             self
             nixpkgs
-            home-manager
             system
             ;
           pkgs = pkgsFor system;

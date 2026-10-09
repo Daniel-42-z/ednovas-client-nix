@@ -72,17 +72,11 @@ def PatchArchive(archiveData, shimData, version, tunSupport):
     loader = contents["dist-electron/main.js"].decode().strip()
     if loader != "'use strict';\nrequire('bytenode');\nrequire('./main.jsc');":
         raise ValueError("Upstream loader changed; review the integration")
-    bytecode = contents["dist-electron/main.jsc"]
-    for requiredString in (
-        b"EdNovas-Core", b"check-is-admin", b"check-tun-service-available",
-        b"relaunch-as-admin", b"start-clash-service-secure", b"spawn",
-    ):
-        if requiredString not in bytecode:
-            raise ValueError(f"Upstream integration point disappeared: {requiredString!r}")
+    if not contents.get("dist-electron/main.jsc"):
+        raise ValueError("Upstream bytecode is missing")
     contents["dist-electron/main.js"] = (
-        b"'use strict';\nconst nixTunSupport = "
-        + (b"true" if tunSupport else b"false") + b";\n"
-        + shimData + b"\nrequire('bytenode');\nrequire('./main.jsc');\n"
+        b"'use strict';\n" + shimData
+        + b"\nrequire('bytenode');\nrequire('./main.jsc');\n"
     )
     return WriteArchive(header, contents)
 
