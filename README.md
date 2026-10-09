@@ -1,6 +1,6 @@
 # EdNovas Cloud for Nix
 
-A flake package for the official [EdNovas Cloud Linux client](https://download.ednovas.org/), repackaged from its Debian archive. The GUI, bundled Electron, standard and compatible proxy cores, and geodata stay together. Initially supports `x86_64-linux`.
+A flake package for the official [EdNovas Cloud Linux client](https://download.ednovas.org/), repackaged from its AppImage. The GUI, bundled Electron, standard and compatible proxy cores, and geodata stay together. Initially supports `x86_64-linux`.
 
 ## Build and run locally
 
@@ -22,7 +22,7 @@ nix build .#ednovas-cloud-tun --out-link result-tun
 nix flake check --print-build-logs
 ```
 
-Electron uses its user namespace sandbox; the launcher disables only the setuid sandbox helper. The host must permit unprivileged user namespaces. On Wayland, set `NIXOS_OZONE_WL=1` to request native Wayland; otherwise Electron can use XWayland.
+The launcher matches the upstream AppImage desktop entry with `--no-sandbox`. This disables Electron’s Chromium sandbox and reduces process isolation. It runs as your normal user; do not launch the GUI with sudo. To opt into the user namespace sandbox, override the package with `electronSandbox = true` (the host must permit unprivileged user namespaces). On Wayland, set `NIXOS_OZONE_WL=1` to request native Wayland; otherwise Electron can use XWayland.
 
 Your application configuration and credentials use the upstream application's normal user data directory. The Nix store stays read-only, and the bundled binary update manifest is removed. Update the package through this flake.
 
@@ -67,12 +67,12 @@ Setting `tun.enable = false` installs only the proxy package and creates no priv
 
 Options:
 
-| Module | Option | Default |
-| --- | --- | --- |
-| Both | `programs.ednovas-cloud.enable` | `false` |
-| Both | `programs.ednovas-cloud.package` | Bundled flake package |
-| NixOS | `programs.ednovas-cloud.tun.enable` | `false` |
-| NixOS | `programs.ednovas-cloud.tun.group` | `"ednovas-cloud"` |
+| Module | Option                              | Default               |
+| ------ | ----------------------------------- | --------------------- |
+| Both   | `programs.ednovas-cloud.enable`     | `false`               |
+| Both   | `programs.ednovas-cloud.package`    | Bundled flake package |
+| NixOS  | `programs.ednovas-cloud.tun.enable` | `false`               |
+| NixOS  | `programs.ednovas-cloud.tun.group`  | `"ednovas-cloud"`     |
 
 If overriding `package` in NixOS, preserve its `tunSupport` override and `coreRelativePaths` passthru attributes. The overlay is available as `inputs.ednovas-cloud.overlays.default`; modules work without adding it.
 
@@ -100,9 +100,13 @@ nix run .#update -- --write
 nix flake check --print-build-logs
 ```
 
-Check mode is the default and outputs JSON without changing files. Write mode downloads each configured Debian archive, verifies package name/version/architecture, computes its SHA-256 source hash, and atomically replaces `nix/release.json`. Errors leave the manifest untouched; older or unchanged versions produce no changes. It does not commit or push anything.
+Check mode is the default and outputs JSON without changing files. Write mode downloads each configured AppImage, verifies its ELF architecture and embedded SquashFS header and bounds, computes its SHA-256 source hash, and atomically replaces `nix/release.json`. Errors leave the manifest untouched; older or unchanged versions produce no changes. It does not commit or push anything.
 
-The release manifest maps Nix systems to upstream URLs, hashes, and Debian architectures. To add ARM64 later, add an `aarch64-linux` entry with `debArchitecture = "arm64"` and validate the package on that architecture. The flake derives its supported systems from this map, and the updater requires every configured architecture in the newest release.
+The release manifest maps Nix systems to upstream URLs, hashes, and AppImage architectures. To add ARM64 later, add an `aarch64-linux` entry with `appImageArchitecture = "arm64"` and validate the package on that architecture. The flake derives its supported systems from this map, and the updater requires every configured architecture in the newest release.
+
+The build verifies the AppImage desktop version and extracts its filesystem without running the downloaded executable, using a single decompression thread. No FUSE mount is required. The desktop entry uses an absolute icon path so icon theme caching does not hide it.
+
+The AppImage's obsolete GTK2 AppIndicator, Indicator, and GConf libraries are omitted because their dependencies are unavailable in current Nixpkgs. The package supplies GTK3 AppIndicator for Electron's tray integration.
 
 The loader patch checks the upstream version, entrypoint, loader contents, and required bytecode integration markers. If these change, builds fail and the updater cannot publish an update PR until the integration is reviewed.
 
@@ -122,6 +126,8 @@ Configure the GitHub repository after publishing:
 The ordinary package-check workflow runs for human pushes and PRs. GitHub's remote PR/merge behavior can only be validated after publication; local checks do not contact a remote.
 
 ## Usage test
+
+The Debian-based build froze during login on the development machine. The raw AppImage works as a normal user with `--no-sandbox`; the repackaged AppImage still needs the same manual usage test. Builds do not launch Electron. If it still freezes, try `ednovas-cloud --disable-gpu` to investigate graphics acceleration.
 
 - Launch, sign in, load a subscription, and verify the tray and notifications on your desktop.
 - Test ordinary proxy traffic and switching nodes. On desktops without an applicable system proxy backend, use the app's local HTTP/SOCKS port in your browser or environment settings.

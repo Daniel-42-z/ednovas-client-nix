@@ -38,7 +38,7 @@
           appPackage = pkgs.callPackage ./nix/package.nix { };
           updaterSource = pkgs.lib.fileset.toSource {
             root = ./scripts;
-            fileset = ./scripts/update.py;
+            fileset = pkgs.lib.fileset.unions [ ./scripts/update.py ./scripts/appimage.py ];
           };
           updater = pkgs.stdenvNoCC.mkDerivation {
             pname = "ednovas-update";
@@ -49,6 +49,7 @@
             installPhase = ''
               mkdir -p "$out/share/ednovas-update" "$out/bin"
               cp ${updaterSource}/update.py "$out/share/ednovas-update/update.py"
+              cp ${updaterSource}/appimage.py "$out/share/ednovas-update/appimage.py"
               test -s "$out/share/ednovas-update/update.py"
               makeWrapper ${pkgs.python3}/bin/python3 "$out/bin/ednovas-update" \
                 --add-flags "$out/share/ednovas-update/update.py" \

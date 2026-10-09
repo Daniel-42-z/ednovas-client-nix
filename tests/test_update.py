@@ -1,8 +1,7 @@
-import io
 import json
 from pathlib import Path
 import sys
-import tarfile
+import struct
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -11,63 +10,59 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import update
 
 
-def ReleaseLink(version, architecture="amd64"):
+def ReleaseLink(version, architecture="x86_64"):
     return (f"https://storage.ednovas.org/desktop/{version}/"
-            f"EdNovas-Cloud-{version}-Linux-{architecture}.deb")
+            f"EdNovas-Cloud-{version}-Linux-{architecture}.AppImage")
 
 
-def DebianArchive(version="1.1.80", architecture="amd64"):
-    controlData = (f"Package: ednovas-cloud\nVersion: {version}\n"
-                   f"Architecture: {architecture}\n").encode()
-    controlBuffer = io.BytesIO()
-    with tarfile.open(fileobj=controlBuffer, mode="w:gz") as archive:
-        member = tarfile.TarInfo("./control")
-        member.size = len(controlData)
-        archive.addfile(member, io.BytesIO(controlData))
-    archiveData = b"!<arch>\n"
-    for memberName, memberData in [("debian-binary", b"2.0\n"),
-                                    ("control.tar.gz", controlBuffer.getvalue()),
-                                    ("data.tar.xz", b"fixture payload")]:
-        header = (f"{memberName + '/':<16}{0:<12}{0:<6}{0:<6}{'100644':<8}"
-                  f"{len(memberData):<10}`\n").encode()
-        archiveData += header + memberData + (b"\n" if len(memberData) % 2 else b"")
-    return archiveData
+def AppImageArchive(architecture="x86_64"):
+    header = bytearray(64)
+    header[:7] = b"\x7fELF\x02\x01\x01"
+    header[8:11] = b"AI\x02"
+    struct.pack_into("<H", header, 18, 62 if architecture == "x86_64" else 183)
+    struct.pack_into("<Q", header, 40, 64)
+    struct.pack_into("<HH", header, 58, 64, 1)
+    superblock = bytearray(96)
+    superblock[:4] = b"hsqs"
+    struct.pack_into("<HH", superblock, 28, 4, 0)
+    struct.pack_into("<Q", superblock, 40, 112)
+    return bytes(header) + b"\0" * 64 + bytes(superblock) + b"fixture payload!"
 
 
 class UpdateTests(unittest.TestCase):
     def test_latest_version_is_numeric_and_ignores_foreign_links(self):
-        pageData = "".join(f'<a href="{ReleaseLink(version)}">deb</a>'
+        pageData = "".join(f'<a href="{ReleaseLink(version)}">AppImage</a>'
                            for version in ["1.1.9", "1.1.80", "1.1.79"])
-        pageData += '<a href="https://example.com/desktop/99.0.0/app.deb">foreign</a>'
-        self.assertEqual(update.FindLatest(pageData, ["amd64"])[0], "1.1.80")
+        pageData += '<a href="https://example.com/desktop/99.0.0/app.AppImage">foreign</a>'
+        self.assertEqual(update.FindLatest(pageData, ["x86_64"])[0], "1.1.80")
 
     def test_missing_newest_architecture_does_not_select_an_old_release(self):
         pageData = (f'<a href="{ReleaseLink("1.1.80")}">x64</a>'
                     f'<a href="{ReleaseLink("1.1.79", "arm64")}">ARM</a>')
         with self.assertRaises(ValueError):
-            update.FindLatest(pageData, ["amd64", "arm64"])
+            update.FindLatest(pageData, ["x86_64", "arm64"])
 
     def test_malformed_page_is_an_error(self):
         with self.assertRaises(ValueError):
-            update.FindLatest("<html>Maintenance</html>", ["amd64"])
+            update.FindLatest("<html>Maintenance</html>", ["x86_64"])
 
     def test_archive_identity_and_truncation_are_checked(self):
         with tempfile.TemporaryDirectory() as directory:
-            archivePath = Path(directory) / "app.deb"
-            archivePath.write_bytes(DebianArchive())
-            update.ValidateDeb(archivePath, "1.1.80", "amd64")
+            archivePath = Path(directory) / "app.AppImage"
+            archivePath.write_bytes(AppImageArchive())
+            update.ValidateAppImage(archivePath, "x86_64")
             with self.assertRaises(ValueError):
-                update.ValidateDeb(archivePath, "1.1.80", "arm64")
-            archivePath.write_bytes(DebianArchive()[:-3])
+                update.ValidateAppImage(archivePath, "arm64")
+            archivePath.write_bytes(AppImageArchive()[:-3])
             with self.assertRaises(ValueError):
-                update.ValidateDeb(archivePath, "1.1.80", "amd64")
+                update.ValidateAppImage(archivePath, "x86_64")
 
     def RunUpdate(self, advertisedVersion, write, brokenArchive=False):
         with tempfile.TemporaryDirectory() as directory:
             manifestPath = Path(directory) / "release.json"
             originalManifest = {"version": "1.1.79", "sources": {
                 "x86_64-linux": {"url": ReleaseLink("1.1.79"),
-                                  "hash": "original", "debArchitecture": "amd64"}}}
+                                  "hash": "original", "appImageArchitecture": "x86_64"}}}
             manifestPath.write_text(json.dumps(originalManifest))
             originalData = manifestPath.read_bytes()
             calls = []
@@ -75,10 +70,10 @@ class UpdateTests(unittest.TestCase):
             def FakeDownload(url, destination):
                 calls.append(url)
                 if url == update.downloadPage:
-                    destination.write_text(f'<a href="{ReleaseLink(advertisedVersion)}">deb</a>')
+                    destination.write_text(f'<a href="{ReleaseLink(advertisedVersion)}">AppImage</a>')
                 else:
-                    destination.write_bytes(b"Not a Debian archive" if brokenArchive
-                                            else DebianArchive(advertisedVersion))
+                    destination.write_bytes(b"Not an AppImage" if brokenArchive
+                                            else AppImageArchive())
 
             with patch.object(update, "Download", FakeDownload):
                 if brokenArchive:

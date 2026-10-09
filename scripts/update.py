@@ -4,19 +4,19 @@ import argparse
 import base64
 import hashlib
 from html.parser import HTMLParser
-import io
 import json
 from pathlib import Path
 import re
 import subprocess
 import sys
-import tarfile
 import tempfile
+
+from appimage import ValidateAppImage
 
 downloadPage = "https://download.ednovas.org/"
 downloadPattern = re.compile(
     r"https://storage\.ednovas\.org/desktop/(?P<version>\d+\.\d+\.\d+)/"
-    r"EdNovas-Cloud-(?P=version)-Linux-(?P<architecture>amd64|arm64)\.deb"
+    r"EdNovas-Cloud-(?P=version)-Linux-(?P<architecture>x86_64|arm64)\.AppImage"
 )
 
 
@@ -44,7 +44,7 @@ def FindLatest(pageData, requiredArchitectures):
     parser = DownloadParser()
     parser.feed(pageData)
     if not parser.downloads:
-        raise ValueError("No recognized Linux Debian releases on the download page")
+        raise ValueError("No recognized Linux AppImage releases on the download page")
     latestVersion = max(parser.downloads, key=VersionKey)
     latestSources = parser.downloads[latestVersion]
     if not set(requiredArchitectures).issubset(latestSources):
@@ -59,47 +59,6 @@ def Download(url, destination):
         "--connect-timeout", "15", "--max-time", "600",
         "--retry", "3", "--retry-delay", "2", "--output", str(destination), url,
     ], check=True)
-
-
-def ValidateDeb(archivePath, version, architecture):
-    controlData = None
-    hasPayload = False
-    with archivePath.open("rb") as archiveFile:
-        if archiveFile.read(8) != b"!<arch>\n":
-            raise ValueError("Download is not a Debian archive")
-        while header := archiveFile.read(60):
-            if len(header) != 60 or header[58:60] != b"`\n":
-                raise ValueError("Malformed Debian archive member")
-            memberName = header[:16].decode().strip().rstrip("/")
-            memberSize = int(header[48:58])
-            if memberSize < 0:
-                raise ValueError("Invalid Debian archive member size")
-            if memberName.startswith("control.tar"):
-                if memberSize > 16 * 1024 * 1024:
-                    raise ValueError("Unexpectedly large Debian control archive")
-                memberData = archiveFile.read(memberSize)
-                with tarfile.open(fileobj=io.BytesIO(memberData)) as controlArchive:
-                    for member in controlArchive:
-                        if member.name.removeprefix("./") == "control" and member.isfile():
-                            if member.size > 1024 * 1024:
-                                raise ValueError("Unexpectedly large Debian control metadata")
-                            controlData = controlArchive.extractfile(member).read().decode()
-            else:
-                if memberName.startswith("data.tar") and memberSize > 0:
-                    hasPayload = True
-                archiveFile.seek(memberSize, 1)
-            if memberSize % 2:
-                archiveFile.seek(1, 1)
-            if archiveFile.tell() > archivePath.stat().st_size:
-                raise ValueError("Truncated Debian archive")
-    if not controlData or not hasPayload:
-        raise ValueError("Debian archive lacks control metadata or payload")
-    fields = dict(line.split(": ", 1) for line in controlData.splitlines()
-                  if ": " in line and not line.startswith(" "))
-    if (fields.get("Package"), fields.get("Version"), fields.get("Architecture")) != (
-        "ednovas-cloud", version, architecture
-    ):
-        raise ValueError("Debian package identity does not match the advertised release")
 
 
 def HashFile(filePath):
@@ -117,7 +76,7 @@ def UpdateRelease(manifestPath, write=False):
         pagePath = workPath / "downloads.html"
         Download(downloadPage, pagePath)
         latestVersion, latestSources = FindLatest(
-            pagePath.read_text(), [source["debArchitecture"] for source in manifest["sources"].values()]
+            pagePath.read_text(), [source["appImageArchitecture"] for source in manifest["sources"].values()]
         )
         hasUpdate = VersionKey(latestVersion) > VersionKey(currentVersion)
         result = {"currentVersion": currentVersion, "latestVersion": latestVersion,
@@ -126,12 +85,12 @@ def UpdateRelease(manifestPath, write=False):
             return result
         candidate = {"version": latestVersion, "sources": {}}
         for system, source in manifest["sources"].items():
-            architecture = source["debArchitecture"]
-            archivePath = workPath / f"{architecture}.deb"
+            architecture = source["appImageArchitecture"]
+            archivePath = workPath / f"{architecture}.AppImage"
             sourceUrl = latestSources[architecture]
             print(f"Downloading and validating {latestVersion} ({architecture})", file=sys.stderr)
             Download(sourceUrl, archivePath)
-            ValidateDeb(archivePath, latestVersion, architecture)
+            ValidateAppImage(archivePath, architecture)
             candidate["sources"][system] = {
                 **source, "url": sourceUrl, "hash": HashFile(archivePath),
             }
@@ -158,7 +117,7 @@ def Main():
     args = parser.parse_args()
     try:
         result = UpdateRelease(args.repo.resolve() / "nix/release.json", args.write)
-    except (OSError, ValueError, KeyError, tarfile.TarError, subprocess.CalledProcessError) as error:
+    except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, f"Update failed: {error}\n")
     print(json.dumps(result))
 

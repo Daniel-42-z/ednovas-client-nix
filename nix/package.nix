@@ -2,7 +2,7 @@
   lib,
   stdenv,
   fetchurl,
-  dpkg,
+  squashfsTools,
   autoPatchelfHook,
   wrapGAppsHook3,
   makeWrapper,
@@ -43,6 +43,7 @@
   procps,
   psmisc,
   tunSupport ? false,
+  electronSandbox ? false,
 }:
 let
   release = builtins.fromJSON (builtins.readFile ./release.json);
@@ -56,7 +57,7 @@ stdenv.mkDerivation {
   src = fetchurl { inherit (source) url hash; };
 
   nativeBuildInputs = [
-    dpkg
+    squashfsTools
     autoPatchelfHook
     wrapGAppsHook3
     makeWrapper
@@ -109,17 +110,25 @@ stdenv.mkDerivation {
 
   unpackPhase = ''
     runHook preUnpack
-    dpkg --fsys-tarfile "$src" | tar --extract --no-same-permissions
+    offset=$(python3 ${../scripts/appimage.py} "$src" ${lib.escapeShellArg source.appImageArchitecture})
+    unsquashfs -processors 1 -no-progress -o "$offset" -d appimage "$src"
     runHook postUnpack
   '';
 
   installPhase = ''
     runHook preInstall
     mkdir -p "$out/lib" "$out/bin" "$out/share"
-    cp -r opt/EdNovasCloud "$out/lib/ednovas-cloud"
-    cp -r usr/share/applications usr/share/icons "$out/share/"
+    cp -r appimage "$out/lib/ednovas-cloud"
+    grep -Fx ${lib.escapeShellArg "X-AppImage-Version=${release.version}"} appimage/ednovas-cloud.desktop
+    mkdir -p "$out/share/applications"
+    cp appimage/ednovas-cloud.desktop "$out/share/applications/"
+    cp -r appimage/usr/share/icons "$out/share/"
     appDir="$out/lib/ednovas-cloud"
-    # No Debian maintainer scripts or setuid Electron sandbox in the Nix store.
+    # Electron uses GTK3; omit obsolete GTK2 fallbacks whose dependencies
+    # are unavailable in current Nixpkgs. GTK3 AppIndicator is supplied below.
+    rm "$appDir/usr/lib/libappindicator.so.1" \
+      "$appDir/usr/lib/libindicator.so.7" "$appDir/usr/lib/libgconf-2.so.4"
+    # No FUSE mounts or setuid Electron sandbox in the Nix store.
     chmod 0755 "$appDir/chrome-sandbox"
     python3 ${../scripts/patch-asar.py} \
       "$appDir/resources/app.asar" ${../scripts/runtime-shim.js} \
@@ -128,7 +137,8 @@ stdenv.mkDerivation {
     rm -f "$appDir/resources/app-update.yml"
     printf 'nix\n' > "$appDir/resources/package-type"
     substituteInPlace "$out/share/applications/ednovas-cloud.desktop" \
-      --replace-fail /opt/EdNovasCloud/ednovas-cloud "$out/bin/ednovas-cloud"
+      --replace-fail 'Exec=AppRun --no-sandbox %U' "Exec=$out/bin/ednovas-cloud %U" \
+      --replace-fail 'Icon=ednovas-cloud' "Icon=$out/share/icons/hicolor/2048x2048/apps/ednovas-cloud.png"
     runHook postInstall
   '';
 
@@ -143,12 +153,12 @@ stdenv.mkDerivation {
           psmisc
         ]
       } \
-      --add-flags --disable-setuid-sandbox \
+      --add-flags ${if electronSandbox then "--disable-setuid-sandbox" else "--no-sandbox"} \
       --add-flags "\''${NIXOS_OZONE_WL:+\''${WAYLAND_DISPLAY:+--ozone-platform-hint=auto}}"
   '';
 
   passthru = {
-    inherit tunSupport;
+    inherit tunSupport electronSandbox;
     coreRelativePaths = {
       standard = "lib/ednovas-cloud/resources/bin/EdNovas-Core";
       compatible = "lib/ednovas-cloud/resources/bin/EdNovas-Core-compatible";
