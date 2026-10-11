@@ -94,7 +94,6 @@ in
           ]))
           pkgs.bash
           pkgs.jq
-          pkgs.jujutsu
           pkgs.gitMinimal
           (lib.getBin pkgs.shellcheck)
           pkgs.actionlint

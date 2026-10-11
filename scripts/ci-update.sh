@@ -3,11 +3,9 @@ set -euo pipefail
 stage=${1:?Use prepare or publish}
 : "${DEFAULT_BRANCH:?Default branch is required}"
 
-IdentityCommit() { jj log --no-pager -r "$1" -G -T commit_id; }
-ConfigureJj() {
-  if [[ ! -d .jj ]]; then jj git init --colocate; fi
-  jj config set --repo user.name '"github-actions[bot]"'
-  jj config set --repo user.email '"41898282+github-actions[bot]@users.noreply.github.com"'
+ConfigureGit() {
+  git config --local user.name 'github-actions[bot]'
+  git config --local user.email '41898282+github-actions[bot]@users.noreply.github.com'
 }
 if [[ "$stage" == prepare ]]; then
   # No changes, commits, pushes, or GitHub writes for unchanged/older releases.
@@ -22,8 +20,9 @@ if [[ "$stage" == prepare ]]; then
     exit 0
   fi
   releaseVersion=$(jq -er '.latestVersion' /tmp/ednovas-update.json)
-  ConfigureJj
-  jj describe -m "Update EdNovas Cloud to $releaseVersion"
+  ConfigureGit
+  git add -- nix/release.json
+  git commit -m "Update EdNovas Cloud to $releaseVersion"
   python3 scripts/candidate.py prepare --baseline-release "$baselineRelease"
   echo 'changed=true' >> "${GITHUB_OUTPUT:-/dev/stdout}"
 elif [[ "$stage" == publish ]]; then
@@ -31,32 +30,27 @@ elif [[ "$stage" == publish ]]; then
   : "${GH_REPO:?GitHub repository is required}"
   : "${RUN_URL:?Workflow URL is required}"
   : "${VALIDATION_NEEDS:?Validation job results are required}"
-  ConfigureJj
+  ConfigureGit
   python3 scripts/candidate.py gate --needs "$VALIDATION_NEEDS"
-  # Jujutsu's Git subprocess honors Git's in-memory HTTP configuration. The
+  # Git's in-memory HTTP configuration supplies authentication. The
   # token is never persisted in the archived checkout or command arguments.
   export GIT_CONFIG_COUNT=1
   export GIT_CONFIG_KEY_0=http.extraHeader
   GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
   export GIT_CONFIG_VALUE_0
-  jj config set --repo git.subprocess true
   python3 scripts/candidate.py acceptance
   updateCommit=$(jq -er '.identity.commit' .candidate/manifest.json)
   parentCommit=$(jq -er '.identity.parent' .candidate/manifest.json)
   releaseVersion=$(jq -er '.release.version' .candidate/manifest.json)
-  jj git fetch --remote origin --branch "$DEFAULT_BRANCH" --branch ednovas-update
-  if [[ $(IdentityCommit "$DEFAULT_BRANCH@origin") != "$parentCommit" ]]; then
+  git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+  if [[ $(git rev-parse "refs/remotes/origin/$DEFAULT_BRANCH") != "$parentCommit" ]]; then
     echo 'Default branch advanced; prepare and validate a new candidate before publication.' >&2
     exit 1
   fi
   python3 scripts/candidate.py verify
-  if [[ -n $(jj bookmark list --no-pager --remote origin ednovas-update -T 'name') ]]; then
-    jj bookmark track ednovas-update@origin
-  fi
-  # Squash merges and refreshed candidates produce sibling commits. Move the
-  # topic bookmark explicitly; the native push still checks its remote lease.
-  jj bookmark set --allow-backwards ednovas-update -r "$updateCommit"
-  jj git push --remote origin --bookmark ednovas-update
+  remoteUpdateCommit=$(git rev-parse --verify refs/remotes/origin/ednovas-update 2>/dev/null || true)
+  # Refresh sibling candidate commits, but never overwrite a concurrent push.
+  git push --force-with-lease="refs/heads/ednovas-update:$remoteUpdateCommit" origin "$updateCommit:refs/heads/ednovas-update"
   # Confirm the actual remote head and base before reporting success or merging.
   remoteCommit=$(gh api "repos/$GH_REPO/git/ref/heads/ednovas-update" --jq '.object.sha')
   remoteParent=$(gh api "repos/$GH_REPO/commits/$remoteCommit" --jq '.parents | if length == 1 then .[0].sha else "invalid" end')

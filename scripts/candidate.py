@@ -1,9 +1,12 @@
-"""Bind validation and publication to the exact Jujutsu candidate."""
+"""Bind validation and publication to the exact Git candidate."""
 import argparse
 import hashlib
 import json
 from pathlib import Path
 import subprocess
+import tarfile
+import tempfile
+import shutil
 
 requiredSuites = {"build", "x11", "wayland", "network"}
 
@@ -13,18 +16,42 @@ def Run(*args):
 
 
 def Identity():
-    revisions = Run("jj", "log", "--no-pager", "-r", "@", "-G", "-T",
-                    'commit_id ++ "\\n" ++ parents.map(|p| p.commit_id()).join("\\n")').splitlines()
+    # Bind evidence to committed content, never an unsnapshotted working tree.
+    subprocess.run(["git", "diff", "--exit-code", "--quiet"], check=True)
+    subprocess.run(["git", "diff", "--cached", "--exit-code", "--quiet"], check=True)
+    revisions = Run("git", "rev-list", "--parents", "-n", "1", "HEAD").split()
     if len(revisions) != 2:
         raise ValueError("Candidate must have exactly one parent")
     digest = hashlib.sha256()
-    for name in sorted(Run("jj", "file", "list", "--no-pager", "-r", "@").splitlines()):
+    for name in sorted(Run("git", "ls-files", "-z").rstrip("\0").split("\0")):
         path = Path(name)
         if path.is_symlink():
             raise ValueError("Candidate symlinks are unsupported")
         data = path.read_bytes()
         digest.update(json.dumps([name, path.stat().st_mode & 0o111, len(data)]).encode() + b"\0" + data)
     return {"commit": revisions[0], "parent": revisions[1], "tree": digest.hexdigest()}
+
+
+def Archive(manifestPath, outputPath):
+    candidate = json.loads(manifestPath.read_text())
+    if Identity() != candidate["identity"]:
+        raise ValueError("Cannot archive a changed candidate")
+    outputPath = outputPath.resolve()
+    # Clone only committed Git content: no .jj state, build outputs, runner
+    # credentials, or generated artifacts. Write outside the archived tree.
+    with tempfile.TemporaryDirectory() as directory:
+        snapshotPath = Path(directory, "snapshot")
+        subprocess.run(["git", "clone", "--no-local", "--no-checkout", ".", str(snapshotPath)], check=True)
+        subprocess.run(["git", "-C", str(snapshotPath), "checkout", "--detach", candidate["identity"]["commit"]], check=True)
+        origin = Run("git", "remote", "get-url", "origin")
+        subprocess.run(["git", "-C", str(snapshotPath), "remote", "set-url", "origin", origin], check=True)
+        snapshotManifest = snapshotPath / ".candidate/manifest.json"
+        snapshotManifest.parent.mkdir()
+        shutil.copyfile(manifestPath, snapshotManifest)
+        archivePath = Path(directory, "candidate.tar.gz")
+        with tarfile.open(archivePath, "w:gz") as archive:
+            archive.add(snapshotPath, arcname=".")
+        shutil.copyfile(archivePath, outputPath)
 
 
 def RequireResults(candidate, results):
@@ -74,15 +101,19 @@ def ValidationSource():
 
 def Main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=["prepare", "verify", "record", "gate", "acceptance"])
+    parser.add_argument("action", choices=["prepare", "verify", "record", "gate", "acceptance", "archive"])
     parser.add_argument("--manifest", default=".candidate/manifest.json")
     parser.add_argument("--suite")
     parser.add_argument("--results", default="validation-results")
     parser.add_argument("--needs")
     parser.add_argument("--baseline-release")
+    parser.add_argument("--output", default="candidate.tar.gz")
     parser.add_argument("--evidence", default="runtime-acceptance.json")
     args = parser.parse_args()
     manifestPath = Path(args.manifest)
+    if args.action == "archive":
+        Archive(manifestPath, Path(args.output))
+        return
     if args.action == "prepare":
         manifestPath.parent.mkdir(parents=True, exist_ok=True)
         manifestPath.write_text(json.dumps({"identity": Identity(), "release": json.loads(Path("nix/release.json").read_text()),

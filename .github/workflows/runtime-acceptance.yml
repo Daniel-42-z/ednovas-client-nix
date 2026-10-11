@@ -21,10 +21,9 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Prepare one identity for manual acceptance
         run: |
-          nix shell --inputs-from . nixpkgs#jujutsu --command jj git init --colocate
-          nix shell --inputs-from . nixpkgs#jujutsu --command jj describe -m 'Acceptance baseline'
-          nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py prepare --baseline-release "$(cat nix/release.json)"
-          tar --exclude=./candidate.tar.gz --exclude='./result*' -czf candidate.tar.gz .
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit --allow-empty -m 'Acceptance baseline'
+          python3 scripts/candidate.py prepare --baseline-release "$(cat nix/release.json)"
+          python3 scripts/candidate.py archive
       - uses: actions/upload-artifact@v4
         with:
           name: acceptance-source
@@ -54,11 +53,11 @@ jobs:
           ITERATION: ${{ matrix.iteration }}
           RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
         run: |
-          nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py verify
+          python3 scripts/candidate.py verify
           bash scripts/validate.sh build
           for suite in x11 wayland network; do bash scripts/validate.sh "$suite"; done
           mkdir -p acceptance
-          nix shell --inputs-from . nixpkgs#jujutsu --command python3 - <<'PY'
+          python3 - <<'PY'
           import json, os, sys
           from pathlib import Path
           sys.path.insert(0, 'scripts')
@@ -106,9 +105,10 @@ jobs:
           FAULT: ${{ matrix.fault }}
           SUITE: ${{ matrix.suite }}
         run: |
-          nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py verify
+          python3 scripts/candidate.py verify
           python3 scripts/runtime-fault.py "$FAULT"
-          nix shell --inputs-from . nixpkgs#jujutsu --command jj describe -m 'Acceptance fault injection'
+          git add --update
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Acceptance fault injection'
           if bash scripts/validate.sh "$SUITE"; then
             echo 'Fault escaped validation' >&2
             exit 1

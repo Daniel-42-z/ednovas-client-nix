@@ -111,10 +111,9 @@ class CiWorkflowTests(unittest.TestCase):
             updateOutput = 'not-json' if malformed else json.dumps({'changed':changed, 'latestVersion':'1.1.80'})
             scripts = {
                 'nix': f'echo {ShlexQuote(updateOutput)}',
-                'jj': '''if [[ "$1" == log ]]; then
-  if [[ "$*" == *main@origin* ]]; then echo "$REMOTE_PARENT"; else echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi
-fi
-if [[ "$1 $2" == "bookmark list" ]]; then echo 'ednovas-update@origin'; fi''',
+                'git': '''if [[ "$1" == rev-parse ]]; then
+  if [[ "$*" == *main* ]]; then echo "$REMOTE_PARENT"; else echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi
+fi''',
                 'python3': '''if [[ "$2" == gate && "$GATE" != true ]]; then exit 1; fi
 if [[ "$2" == acceptance && "$ACCEPTANCE" != true ]]; then exit 1; fi''',
                 'gh': '''if [[ "$1" == api ]]; then
@@ -143,40 +142,41 @@ if [[ "$1 $2" == "pr create" ]]; then touch "$PR_MARKER"; fi''',
     def test_unchanged_release_does_not_commit_or_publish(self):
         status, commands, errors = self.RunWorkflow('prepare', changed=False)
         self.assertEqual(status, 0, errors)
-        self.assertFalse(any(command.startswith(('gh ', 'jj describe ', 'jj git push ')) for command in commands))
+        self.assertFalse(any(command.startswith(('gh ', 'git commit ', 'git push ')) for command in commands))
 
     def test_malformed_candidate_does_not_publish(self):
         status, commands, _ = self.RunWorkflow('prepare', malformed=True)
         self.assertNotEqual(status, 0)
-        self.assertFalse(any(command.startswith(('gh ', 'jj describe ')) for command in commands))
+        self.assertFalse(any(command.startswith(('gh ', 'git commit ')) for command in commands))
 
     def test_failed_gate_has_no_remote_mutation(self):
         status, commands, _ = self.RunWorkflow('publish', gate=False)
         self.assertNotEqual(status, 0)
-        self.assertFalse(any(command.startswith(('gh ', 'jj git push ', 'jj bookmark set ')) for command in commands))
+        self.assertFalse(any(command.startswith(('gh ', 'git push ')) for command in commands))
 
     def test_advanced_default_branch_requires_retest(self):
         status, commands, _ = self.RunWorkflow('publish', stale=True)
         self.assertNotEqual(status, 0)
-        self.assertFalse(any(command.startswith(('gh ', 'jj git push ')) for command in commands))
+        self.assertFalse(any(command.startswith(('gh ', 'git push ')) for command in commands))
 
     def test_success_publishes_exact_head_after_gate(self):
         status, commands, errors = self.RunWorkflow('publish')
         self.assertEqual(status, 0, errors)
         gateIndex = next(i for i,c in enumerate(commands) if 'candidate.py gate' in c)
-        pushIndex = next(i for i,c in enumerate(commands) if c.startswith('jj git push '))
+        pushIndex = next(i for i,c in enumerate(commands) if c.startswith('git push '))
         statusIndex = next(i for i,c in enumerate(commands) if 'statuses/' in c)
         mergeIndex = next(i for i,c in enumerate(commands) if c.startswith('gh pr merge '))
         self.assertLess(gateIndex, pushIndex)
         self.assertLess(pushIndex, statusIndex)
         self.assertLess(statusIndex, mergeIndex)
         self.assertIn('--match-head-commit ' + 'a'*40, commands[mergeIndex])
-        self.assertFalse(any(c.startswith('git ') for c in commands))
+        self.assertFalse(any(c.startswith('jj ') for c in commands))
+        self.assertIn('--force-with-lease=refs/heads/ednovas-update:' + 'a'*40, commands[pushIndex])
 
     def test_failed_acceptance_blocks_publication_and_auto_merge(self):
         status, commands, _ = self.RunWorkflow('publish', acceptance=False)
         self.assertNotEqual(status, 0)
-        self.assertFalse(any(c.startswith(('gh ', 'jj git push ', 'jj bookmark set ')) for c in commands))
+        self.assertFalse(any(c.startswith(('gh ', 'git push ')) for c in commands))
 
 
 def ShlexQuote(value):
@@ -184,8 +184,44 @@ def ShlexQuote(value):
     return shlex.quote(value)
 
 
-@unittest.skipUnless(shutil.which('jj') and shutil.which('jq'), 'Jujutsu and jq are required')
-class NativeJujutsuTests(unittest.TestCase):
+@unittest.skipUnless(shutil.which('git') and shutil.which('jq'), 'Git and jq are required')
+class NativeGitTests(unittest.TestCase):
+    def test_pull_request_merge_checkout_can_be_archived_for_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            repoPath = Path(directory, 'repo')
+            repoPath.mkdir()
+            env = {**os.environ, 'GIT_CONFIG_GLOBAL': os.devnull, 'GIT_CONFIG_NOSYSTEM': '1'}
+
+            def Git(*args):
+                return subprocess.run(['git', *args], cwd=repoPath, env=env, check=True, capture_output=True, text=True).stdout.strip()
+
+            Git('init', '-b', 'main')
+            Git('config', 'user.name', 'Runtime test')
+            Git('config', 'user.email', 'runtime@example.invalid')
+            Git('remote', 'add', 'origin', str(repoPath))
+            shutil.copytree(scriptRoot, repoPath / 'scripts', ignore=shutil.ignore_patterns('__pycache__'))
+            (repoPath / 'nix').mkdir()
+            (repoPath / 'nix/release.json').write_text('{"version":"1.1.79"}')
+            (repoPath / '.gitignore').write_text('.candidate/\ncandidate.tar.gz\n')
+            Git('add', '.')
+            Git('commit', '-m', 'Baseline')
+            Git('checkout', '-b', 'feature')
+            (repoPath / 'feature').write_text('feature')
+            Git('add', 'feature')
+            Git('commit', '-m', 'Feature')
+            Git('checkout', 'main')
+            Git('merge', '--no-ff', 'feature', '-m', 'PR merge')
+            mergeCommit = Git('rev-parse', 'HEAD')
+            self.assertEqual(len(Git('rev-list', '--parents', '-n', '1', 'HEAD').split()), 3)
+            Git('checkout', '--detach', mergeCommit)
+            Git('commit', '--allow-empty', '-m', 'Validate checkout')
+            for action in ['prepare', 'archive']:
+                result = subprocess.run(['python3', 'scripts/candidate.py', action, '--baseline-release', '{"version":"1.1.79"}'], cwd=repoPath, env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+            manifest = json.loads((repoPath / '.candidate/manifest.json').read_text())
+            self.assertEqual(manifest['identity']['parent'], mergeCommit)
+            self.assertTrue((repoPath / 'candidate.tar.gz').is_file())
+
     def test_candidate_publication_to_disposable_local_remote(self):
         with tempfile.TemporaryDirectory() as directory:
             workPath = Path(directory)
@@ -197,27 +233,26 @@ class NativeJujutsuTests(unittest.TestCase):
             configPath.mkdir()
             testEnv = {**os.environ, 'XDG_CONFIG_HOME': str(configPath)}
 
-            def Jj(*args, cwd=originPath):
-                result = subprocess.run(['jj', *args], cwd=cwd, text=True, capture_output=True, env=testEnv)
+            def Git(*args, cwd=originPath):
+                result = subprocess.run(['git', *args], cwd=cwd, text=True, capture_output=True, env=testEnv)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 return result.stdout.strip()
 
-            subprocess.run(['jj', 'git', 'init', '--colocate', str(originPath)], check=True, capture_output=True, env=testEnv)
-            Jj('config', 'set', '--repo', 'user.name', 'Runtime test')
-            Jj('config', 'set', '--repo', 'user.email', 'runtime@example.invalid')
+            Git('init', '-b', 'main', str(originPath), cwd=workPath)
+            Git('config', '--local', 'user.name', 'Runtime test')
+            Git('config', '--local', 'user.email', 'runtime@example.invalid')
             shutil.copytree(scriptRoot, originPath / 'scripts', ignore=shutil.ignore_patterns('__pycache__'))
             (originPath / 'nix').mkdir()
             (originPath / 'nix/release.json').write_text('{"version":"1.1.79"}')
-            (originPath / '.gitignore').write_text('.candidate/\nvalidation-results/\nruntime-acceptance.json\n')
-            Jj('describe', '-m', 'Baseline')
-            Jj('bookmark', 'set', 'main', '-r', '@')
-            Jj('new', 'main')
+            (originPath / '.gitignore').write_text('.candidate/\nvalidation-results/\nruntime-acceptance.json\ncandidate.tar.gz\n')
+            Git('add', '.')
+            Git('commit', '-m', 'Baseline')
+            Git('checkout', '-b', 'ednovas-update')
             (originPath / 'nix/release.json').write_text('{"version":"1.1.78"}')
-            Jj('describe', '-m', 'Existing update PR')
-            Jj('bookmark', 'set', 'ednovas-update', '-r', '@')
-            Jj('git', 'export')
-            subprocess.run(['jj', 'git', 'clone', '--colocate', str(originPath), str(candidatePath)], check=True, capture_output=True, env=testEnv)
-            Jj('new', 'main@origin', cwd=candidatePath)
+            Git('commit', '-am', 'Existing update PR')
+            Git('checkout', 'main')
+            Git('clone', str(originPath), str(candidatePath), cwd=workPath)
+            Git('checkout', '--detach', 'origin/main', cwd=candidatePath)
             nixPath = binPath / 'nix'
             nixPath.write_text('#!' + shutil.which('bash') + '\nset -eu\nprintf \'{"version":"1.1.80"}\' > nix/release.json\nprintf \'{"changed":true,"latestVersion":"1.1.80"}\\n\'\n')
             nixPath.chmod(0o755)
@@ -249,17 +284,39 @@ if [[ "$1 $2" == "pr create" ]]; then touch "$PR_MARKER"; fi
                 'identity': manifest['identity'], 'release': manifest['release'],
                 'validationSource': manifest['validationSource'], 'baselineRuns': ['a', 'b', 'c'],
                 'faults': {fault: 'detected' for fault in faultChecks}}))
-            # Reproduce an artifact restored on a fresh runner: preserve repo
-            # data, but not the preparer's external secure Jujutsu config.
+            # Match the failing Actions layout: output in the checkout, with
+            # generated build outputs and local JJ state that must not ship.
+            (candidatePath / '.jj').mkdir()
+            (candidatePath / '.jj/private').write_text('local-only')
+            (candidatePath / 'result').symlink_to(workPath)
+            (candidatePath / 'generated.log').write_text('not source')
+            archived = subprocess.run(['python3', 'scripts/candidate.py', 'archive'], cwd=candidatePath, env=env, capture_output=True, text=True)
+            self.assertEqual(archived.returncode, 0, archived.stderr)
             restoredPath = workPath / 'restored'
-            shutil.copytree(candidatePath, restoredPath, symlinks=True)
+            restoredPath.mkdir()
+            subprocess.run(['tar', '-xzf', str(candidatePath / 'candidate.tar.gz'), '-C', str(restoredPath)], check=True)
+            self.assertFalse((restoredPath / '.jj').exists())
+            self.assertFalse((restoredPath / 'result').exists())
+            self.assertFalse((restoredPath / 'generated.log').exists())
+            self.assertFalse((restoredPath / 'candidate.tar.gz').exists())
+            # Verify the archived remote is the actual origin, not the
+            # preparer's temporary checkout, and publish from a fresh runner.
+            self.assertEqual(Git('remote', 'get-url', 'origin', cwd=restoredPath), str(originPath))
+            shutil.copyfile(candidatePath / 'runtime-acceptance.json', restoredPath / 'runtime-acceptance.json')
             candidatePath = restoredPath
             configPath.rename(workPath / 'preparer-config')
             configPath.mkdir()
+            verified = subprocess.run(['python3', 'scripts/candidate.py', 'verify'], cwd=candidatePath, env=env, capture_output=True, text=True)
+            self.assertEqual(verified.returncode, 0, verified.stderr)
+            releasePath = candidatePath / 'nix/release.json'
+            releasePath.write_text('{"version":"dirty"}')
+            dirty = subprocess.run(['python3', 'scripts/candidate.py', 'verify'], cwd=candidatePath, env=env, capture_output=True, text=True)
+            self.assertNotEqual(dirty.returncode, 0)
+            Git('restore', 'nix/release.json', cwd=candidatePath)
             for suite in candidateModule.requiredSuites:
                 subprocess.run(['python3', 'scripts/candidate.py', 'record', '--suite', suite], cwd=candidatePath, env=env, check=True, capture_output=True)
             result = subprocess.run(['bash', 'scripts/ci-update.sh', 'publish'], cwd=candidatePath, env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
-            published = Jj('log', '--no-pager', '-G', '-r', 'ednovas-update@origin', '-T', 'commit_id', cwd=candidatePath)
+            published = Git('rev-parse', 'refs/heads/ednovas-update', cwd=originPath)
             self.assertEqual(published, manifest['identity']['commit'])
             self.assertTrue((workPath / 'pr-created').exists())
