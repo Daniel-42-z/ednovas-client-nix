@@ -1,0 +1,29 @@
+# Numeric local fixture only: no subscription, providers, geodata, or DNS.
+port: 17890
+socks-port: 17891
+allow-lan: false
+bind-address: 127.0.0.1
+mode: rule
+log-level: debug
+ipv6: false
+interface-name: eth1
+routing-mark: 6666
+external-controller: 127.0.0.1:19090
+dns:
+  enable: false
+profile:
+  store-selected: false
+  store-fake-ip: false
+tun:
+  enable: true
+  device: ednovas-test
+  stack: system
+  auto-route: true
+  iproute2-table-index: 2022
+  auto-detect-interface: false
+  strict-route: true
+  # Capture only the lab destination, keeping driver/control traffic intact.
+  route-address:
+    - 203.0.113.2/32
+rules:
+  - MATCH,DIRECT

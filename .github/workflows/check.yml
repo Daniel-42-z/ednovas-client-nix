@@ -1,20 +1,21 @@
-name: Package checks
-
+name: Package and runtime checks
 on:
   push:
   pull_request:
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  validate:
+    uses: ./.github/workflows/validate.yml
+  status:
+    name: ednovas-update/build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    if: always()
+    needs: validate
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-      - run: nix flake check --print-build-logs
+      - name: Require build and every runtime suite
+        env:
+          RESULT: ${{ needs.validate.result }}
+        run: test "$RESULT" = success

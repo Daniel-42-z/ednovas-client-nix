@@ -80,18 +80,42 @@ Builds also validate the advertised desktop version and bundled payload. To supp
 
 ## GitHub automation
 
-The update workflow runs daily at 03:23 UTC and supports manual dispatch. It checks for a new release, runs `nix flake check` (including ordinary and privileged runtime builds), and only then pushes the reusable `ednovas-update` branch, creates or refreshes one PR, and requests squash auto-merge. The exact tested commit receives the `ednovas-update/build` status. Failed downloads or validation do not publish the candidate or create a PR.
+The update workflow runs daily at 03:23 UTC and supports manual dispatch. Unchanged or older releases stop before validation and publication. Preparation creates a local Jujutsu candidate and records its commit, parent, release manifest and tracked-file digest. A shared validation workflow runs production builds, unit tests, NixOS module checks, workflow linting, and three fresh VM suites. Human pushes and PRs use that same workflow and one shared candidate identity.
 
-The CI workflow uses Git for its update branch, commit, and push. Local version control uses Jujutsu. GitHub's built-in `GITHUB_TOKEN` is sufficient; downloads are public, and no PAT or App secret is required.
+Only the publication job has GitHub write permissions. It requires all four success records, verifies the candidate identity again, fetches with Jujutsu, and stops if the default branch advanced. It pushes with Jujutsu's bookmark lease checks, verifies the published head and parent through GitHub, then creates or refreshes the update PR. The exact validated head receives the aggregate `ednovas-update/build` status. Validation happens in the scheduled workflow because `GITHUB_TOKEN` pushes ordinarily do not trigger another workflow. Failed candidates never publish an update branch or PR.
+
+All validation jobs use `ubuntu-24.04`, a 90-minute deadline and a matrix with fail-fast disabled. Nix build outputs are cached; the VM driver is still executed on every run. Runtime preflight requires writable KVM (including successfully creating a VM) and 20 GiB of free disk. Screenshots, Chinese OCR TSV, application logs, journals, process/window inventories, tray details, core logs, route/interface state and TUN packet captures are uploaded when available and retained for 14 days. Each suite reports its result in the Actions summary and successful update PRs link to the evidence.
+
+Changed releases automatically run **Runtime gate acceptance** against the exact prepared candidate, alongside shared validation. Three independent fresh runs must each pass builds and all three runtime suites. All ten fault checks must detect broken close, restore, quit and renderer loading on both desktops, stopped cores and bypassed TUN traffic. Publication requires successful jobs plus acceptance evidence matching the candidate's release, commit, parent, tree and validation implementation. It then requests squash auto-merge with `--match-head-commit`; no repository variable or manual acceptance approval is needed. Unchanged releases skip these jobs. The acceptance workflow also supports manual dispatch for diagnostics.
+
+Server-configuration dialog interaction remains a manual check. Initial local validation of 1.1.79 found that native clicks on the login screen's server-status text do not open its configuration dialog; the status text is inside Electron's draggable area.
 
 Configure the GitHub repository after publishing:
 
 - Enable **Allow GitHub Actions to create and approve pull requests** under Actions → General → Workflow permissions. Organization settings may also control this permission.
 - Enable **Allow auto-merge** and **Allow squash merging** under General → Pull Requests.
-- If requiring validation on the update branch, require the `ednovas-update/build` status. PR/push workflows usually do not run for changes made with `GITHUB_TOKEN`; the update workflow supplies the build status itself.
+- Require the `ednovas-update/build` status and [**Require branches to be up to date before merging**](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches). This prevents queued auto-merge from using validation against an earlier default-branch parent. A later daily or manual update run prepares and retests against the new parent. PR/push workflows usually do not run for changes made with `GITHUB_TOKEN`; the update workflow supplies the status itself.
 - Required human reviews and other branch protection rules still apply. Auto-merge waits for those requirements and does not bypass them. Requiring a separate PR check that this token cannot trigger will prevent auto-merge.
 
 The ordinary package-check workflow runs for human pushes and PRs. GitHub's remote PR/merge behavior can only be validated after publication; local checks do not contact a remote.
+
+## Runtime tests locally
+
+Run from this checkout on `x86_64-linux` with usable KVM. Each command builds the pinned driver, then executes fresh VMs; a cached build never substitutes for execution:
+
+```sh
+bash scripts/validate.sh x11
+bash scripts/validate.sh wayland
+bash scripts/validate.sh network
+```
+
+The corresponding flake packages are `runtime-x11-driver`, `runtime-wayland-driver`, and `runtime-network-driver`. For driver-level debugging, build one package and run `result/bin/nixos-test-driver --interactive --output_directory /tmp/ednovas-debug`. For a clean rerun, use a new output directory, for example `bash scripts/validate.sh x11 /tmp/ednovas-x11-rerun`. In Actions, rerun the workflow's failed jobs; successful candidates must have all four identity-bound result artifacts before publication.
+
+The GUI suites use Openbox/X11 and a separate niri/Wayland compositor with software rendering. Niri uses its winit backend on the guest’s virtual X display so CI needs no 3D device; the application itself connects over Wayland. They use fresh unauthenticated profiles and Chinese OCR only to confirm initial login rendering and locate the email field. Subsequent interactions use native keyboard events and a unique synthetic email copied through the desktop clipboard, with a fresh sentinel to reject stale clipboard contents. Authentication readiness uses native window visibility and focus; hide/restore/quit checks use process, compositor and D-Bus state rather than OCR. Screenshots retain visual evidence of each interaction. They authenticate through the installed launcher, Polkit policy and real GUI agent using a disposable VM administrator password. A separate active VM user outside the configured group must be denied. Privileged mode repeats close/hide/tray activation three times, checks the original process and X11 window identity (or exactly one focused niri window), quits through the exported tray menu, then relaunches and repeats one cycle. Startup and authentication deadlines are 120 seconds, interaction deadlines are 30 seconds, and each start has a 30-second stability observation.
+
+The network suite runs both extracted bundled Mihomo cores in the production FHS environment with the same namespace and capability settings. A second VM serves unique tokens over HTTP. It checks HTTP/SOCKS responses, direct requests through TUN with matching captured request and response bytes, and route/interface cleanup plus direct connectivity after graceful core shutdown. Fixture-only policy rules send unmarked requests through TUN while marked core sockets retain their LAN route; these rules are removed during teardown. Routing changes remain inside the guests. This is **bundled-core coverage**; it does not prove the logged-in GUI generates or applies a working subscription configuration.
+
+Server-configuration dialog interaction, subscription loading, authenticated GUI connections, authenticated profile migration and GPU-specific behavior remain manual checks. See the [NixOS test framework](https://nixos.org/manual/nixos/stable/#sec-nixos-tests) and [Mihomo TUN configuration](https://wiki.metacubex.one/en/config/inbound/tun/) for the underlying interfaces.
 
 ## Manual usage test
 
@@ -110,4 +134,4 @@ Capture privileged application logs from a terminal:
 ednovas-cloud-tun --enable-logging=stderr 2>&1 | tee ednovas-cloud-tun.log
 ```
 
-Upstream logs can contain credentials or subscription tokens; redact them before publishing. Automated checks cover both runtime builds, module authorization policy, profile/input validation, updater behavior, and workflow linting. GUI, authentication-dialog, and live TUN usage remain manual checks.
+Upstream logs can contain credentials or subscription tokens; redact them before publishing. Automated checks cover the builds, module and input validation, updater and workflow gates, unauthenticated GUI interaction and tray lifecycle, and local bundled-core traffic. Live subscription and authenticated GUI traffic remain manual checks.

@@ -40,7 +40,11 @@ in
     assert toString rootPackage.appimageContents != toString appPackage.appimageContents;
     assert !rootPackage.args.privateTmp && !appPackage.args.privateTmp;
     assert !rootPackage.args.unshareUser && !rootPackage.args.unshareNet;
-    assert rootPackage.args.extraBwrapArgs == [ "--cap-add" "ALL" ];
+    assert
+      rootPackage.args.extraBwrapArgs == [
+        "--cap-add"
+        "ALL"
+      ];
     assert !(disabled.security.wrappers ? ednovas-core);
     assert !(tun.security.wrappers ? ednovas-core);
     assert !(tun.security.wrappers ? ednovas-core-compatible);
@@ -90,6 +94,8 @@ in
           ]))
           pkgs.bash
           pkgs.jq
+          pkgs.jujutsu
+          pkgs.gitMinimal
           (lib.getBin pkgs.shellcheck)
           pkgs.actionlint
         ];
@@ -98,7 +104,7 @@ in
         export PYTHONDONTWRITEBYTECODE=1
         cd ${../.}
         python3 -m unittest discover -s tests -p 'test_*.py'
-        shellcheck scripts/ci-update.sh
+        shellcheck scripts/ci-update.sh scripts/validate.sh
         actionlint .github/workflows/*.yml
         echo 'updater, launcher validation, and workflows checked' > "$out"
       '';

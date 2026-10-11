@@ -1,36 +1,84 @@
 name: Update EdNovas Cloud
-
 on:
   schedule:
     - cron: '23 3 * * *'
   workflow_dispatch:
-
 concurrency:
   group: ednovas-release-update
   cancel-in-progress: false
-
 permissions:
-  contents: write
-  pull-requests: write
-  statuses: write
-
+  contents: read
 jobs:
-  update:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    outputs:
+      changed: ${{ steps.prepare.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
       - uses: cachix/install-nix-action@v31
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+      - name: Prepare candidate without publishing
+        id: prepare
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: nix shell --inputs-from . nixpkgs#jujutsu nixpkgs#jq --command bash scripts/ci-update.sh prepare
+      - name: Archive exact candidate and local VCS identity
+        if: steps.prepare.outputs.changed == 'true'
+        run: tar --exclude=./candidate.tar.gz --exclude='./result*' -czf candidate.tar.gz .
+      - uses: actions/upload-artifact@v4
+        if: steps.prepare.outputs.changed == 'true'
         with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-      - name: Check release, validate, and publish successful update
+          name: candidate
+          path: candidate.tar.gz
+          overwrite: true
+          retention-days: 14
+  validate:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    uses: ./.github/workflows/validate.yml
+    with:
+      candidate: true
+  acceptance:
+    needs: prepare
+    if: needs.prepare.outputs.changed == 'true'
+    uses: ./.github/workflows/runtime-acceptance.yml
+    with:
+      candidate: true
+  publish:
+    needs: [prepare, validate, acceptance]
+    if: needs.prepare.outputs.changed == 'true' && needs.validate.result == 'success' && needs.acceptance.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: candidate
+      - run: |
+          mv candidate.tar.gz /tmp/candidate.tar.gz
+          tar -xzf /tmp/candidate.tar.gz
+      - uses: actions/download-artifact@v4
+        with:
+          name: validated-candidate
+          path: validation-results
+      - uses: cachix/install-nix-action@v31
+      - uses: actions/download-artifact@v4
+        with:
+          name: runtime-acceptance
+      - name: Publish validated candidate
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: nix shell --inputs-from . nixpkgs#git nixpkgs#gh nixpkgs#jq --command bash scripts/ci-update.sh
+          VALIDATION_NEEDS: ${{ toJSON(needs) }}
+        run: nix shell --inputs-from . nixpkgs#jujutsu nixpkgs#gh nixpkgs#jq nixpkgs#ripgrep --command bash scripts/ci-update.sh publish

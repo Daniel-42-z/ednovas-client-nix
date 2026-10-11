@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 .direnv/
 **.log
+/.candidate/
+/validation-results/
+/runtime-results/
+/runtime-acceptance.json
+/candidate.tar.gz
+/acceptance/

@@ -1,0 +1,128 @@
+name: Shared validation
+on:
+  workflow_call:
+    inputs:
+      candidate:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  source:
+    if: '!inputs.candidate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Prepare one identity for all matrix jobs
+        run: |
+          nix shell --inputs-from . nixpkgs#jujutsu --command jj git init --colocate
+          nix shell --inputs-from . nixpkgs#jujutsu --command jj describe -m 'Validate checkout'
+          nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py prepare --baseline-release "$(cat nix/release.json)"
+          tar --exclude=./candidate.tar.gz --exclude='./result*' -czf candidate.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validation-source
+          path: candidate.tar.gz
+          overwrite: true
+          retention-days: 14
+  suite:
+    needs: source
+    if: always() && (inputs.candidate || needs.source.result == 'success')
+    name: ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [build, x11, wayland, network]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.candidate && 'candidate' || 'validation-source' }}
+          path: /tmp/candidate
+      - name: Restore prepared candidate
+        run: |
+          find . -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          tar -xzf /tmp/candidate/candidate.tar.gz
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+      - name: Bind checkout identity
+        run: |
+          nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py verify
+      - name: Run fresh suite
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: bash scripts/validate.sh "$SUITE"
+      - name: Record success bound to candidate
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py record --suite "$SUITE"
+      - name: Suite summary
+        if: always()
+        env:
+          SUITE: ${{ matrix.suite }}
+          RESULT: ${{ job.status }}
+        run: echo "### $SUITE — $RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          include-hidden-files: true
+          name: runtime-${{ matrix.suite }}
+          path: |
+            runtime-results/
+            validation-results/
+            .candidate/manifest.json
+          overwrite: true
+          retention-days: 14
+          if-no-files-found: warn
+  aggregate:
+    name: Candidate validation evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    if: always()
+    needs: suite
+    steps:
+      - name: Require every matrix job
+        env:
+          RESULT: ${{ needs.suite.result }}
+        run: test "$RESULT" = success
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: runtime-*
+          path: evidence
+      - name: Require complete consistent evidence
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          required = {'build', 'x11', 'wayland', 'network'}
+          results = {}
+          for path in Path('evidence').glob('*/validation-results/*.json'):
+              if path.stem in results:
+                  raise SystemExit('Duplicate suite evidence')
+              results[path.stem] = json.loads(path.read_text())
+          assert set(results) == required, 'Missing suite evidence'
+          assert all(value['result'] == 'success' for value in results.values())
+          assert len({json.dumps(value['identity'], sort_keys=True) for value in results.values()}) == 1
+          Path('validation-results').mkdir()
+          for suite, value in results.items():
+              Path('validation-results', suite + '.json').write_text(json.dumps(value))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validated-candidate
+          path: validation-results/
+          overwrite: true
+          retention-days: 14

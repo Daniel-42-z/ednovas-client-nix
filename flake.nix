@@ -67,6 +67,13 @@
           inherit updater;
           default = appPackage;
         }
+        // pkgs.lib.optionalAttrs (system == "x86_64-linux") (
+          import ./nix/runtime/default.nix {
+            inherit pkgs;
+            module = self.nixosModules.default;
+            inherit appPackage;
+          }
+        )
       );
 
       apps = forAllSystems (system: {

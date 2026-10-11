@@ -1,0 +1,171 @@
+name: Runtime gate acceptance
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      candidate:
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  source:
+    if: '!inputs.candidate'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: cachix/install-nix-action@v31
+      - name: Prepare one identity for manual acceptance
+        run: |
+          nix shell --inputs-from . nixpkgs#jujutsu --command jj git init --colocate
+          nix shell --inputs-from . nixpkgs#jujutsu --command jj describe -m 'Acceptance baseline'
+          nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py prepare --baseline-release "$(cat nix/release.json)"
+          tar --exclude=./candidate.tar.gz --exclude='./result*' -czf candidate.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-source
+          path: candidate.tar.gz
+          overwrite: true
+          retention-days: 14
+  baseline:
+    needs: source
+    if: always() && (inputs.candidate || needs.source.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        iteration: [a, b, c]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.candidate && 'candidate' || 'acceptance-source' }}
+          path: /tmp/candidate
+      - name: Restore exact candidate
+        run: tar -xzf /tmp/candidate/candidate.tar.gz
+      - uses: cachix/install-nix-action@v31
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+      - name: Run independent baseline
+        env:
+          ITERATION: ${{ matrix.iteration }}
+          RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py verify
+          bash scripts/validate.sh build
+          for suite in x11 wayland network; do bash scripts/validate.sh "$suite"; done
+          mkdir -p acceptance
+          nix shell --inputs-from . nixpkgs#jujutsu --command python3 - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0, 'scripts')
+          from candidate import Identity, ValidationSource
+          Path('acceptance/baseline-' + os.environ['ITERATION'] + '.json').write_text(json.dumps({
+              'run': os.environ['RUN_ID'] + '-' + os.environ['ITERATION'],
+              'release': json.loads(Path('nix/release.json').read_text()),
+              'identity': Identity(), 'validationSource': ValidationSource()}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-baseline-${{ matrix.iteration }}
+          path: |
+            runtime-results/
+            acceptance/
+          overwrite: true
+          retention-days: 14
+  fault:
+    needs: source
+    if: always() && (inputs.candidate || needs.source.result == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        fault: [close, restore, quit, renderer]
+        suite: [x11, wayland]
+        include:
+          - fault: stopped-core
+            suite: network
+          - fault: bypass-tun
+            suite: network
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.candidate && 'candidate' || 'acceptance-source' }}
+          path: /tmp/candidate
+      - name: Restore exact candidate
+        run: tar -xzf /tmp/candidate/candidate.tar.gz
+      - uses: cachix/install-nix-action@v31
+      - uses: DeterminateSystems/magic-nix-cache-action@v13
+      - name: Require deliberate fault to fail at the expected assertion
+        env:
+          FAULT: ${{ matrix.fault }}
+          SUITE: ${{ matrix.suite }}
+        run: |
+          nix shell --inputs-from . nixpkgs#jujutsu --command python3 scripts/candidate.py verify
+          python3 scripts/runtime-fault.py "$FAULT"
+          nix shell --inputs-from . nixpkgs#jujutsu --command jj describe -m 'Acceptance fault injection'
+          if bash scripts/validate.sh "$SUITE"; then
+            echo 'Fault escaped validation' >&2
+            exit 1
+          fi
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          phases = {'close':{'hide','restore'}, 'restore':{'restore'}, 'quit':{'quit'}, 'renderer':{'render'}, 'stopped-core':{'proxy'}, 'bypass-tun':{'tun'}}
+          fault, suite = os.environ['FAULT'], os.environ['SUITE']
+          phase = json.loads(Path('runtime-results', suite, 'phase.json').read_text())['phase']
+          assert phase in phases[fault], f'Unrelated failure in {phase}'
+          Path('acceptance').mkdir()
+          Path('acceptance', fault + '-' + suite + '.json').write_text(json.dumps({'fault':fault, 'suite':suite, 'result':'detected',
+              'identity':json.loads(Path('.candidate/manifest.json').read_text())['identity']}))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: acceptance-${{ matrix.fault }}-${{ matrix.suite }}
+          path: |
+            runtime-results/
+            acceptance/
+          overwrite: true
+          retention-days: 14
+  evidence:
+    needs: [baseline, fault]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: acceptance-*
+          path: evidence
+      - name: Assemble acceptance attestation
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          records = [json.loads(p.read_text()) for p in Path('evidence').glob('*/acceptance/*.json')]
+          baselines = [r for r in records if 'run' in r]
+          assert len(baselines) == 3 and len({r['run'] for r in baselines}) == 3
+          assert len({json.dumps(r['release'], sort_keys=True) for r in baselines}) == 1
+          assert len({r['validationSource'] for r in baselines}) == 1
+          assert len({json.dumps(r['identity'], sort_keys=True) for r in baselines}) == 1
+          faults = [r for r in records if 'fault' in r]
+          expected = {(f,s) for f in ['close','restore','quit','renderer'] for s in ['x11','wayland']}
+          expected |= {('stopped-core','network'), ('bypass-tun','network')}
+          assert len(faults) == len(expected) and {(r['fault'],r['suite']) for r in faults} == expected
+          assert all(r['result'] == 'detected' and r['identity'] == baselines[0]['identity'] for r in faults)
+          Path('runtime-acceptance.json').write_text(json.dumps({
+              'release': baselines[0]['release'], 'identity': baselines[0]['identity'],
+              'validationSource': baselines[0]['validationSource'],
+              'baselineRuns': [r['run'] for r in baselines], 'faults': {r['fault'] + '-' + r['suite']:'detected' for r in faults}}, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runtime-acceptance
+          path: runtime-acceptance.json
+          overwrite: true
+          retention-days: 14
