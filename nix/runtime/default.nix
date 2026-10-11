@@ -74,6 +74,7 @@ let
                 package = appPackage;
                 tun.enable = true;
               };
+              specialisation.passwordless.configuration.programs.ednovas-cloud.tun.passwordless = true;
               users.users.alice = {
                 isNormalUser = true;
                 uid = 1000;

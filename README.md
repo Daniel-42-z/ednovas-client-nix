@@ -39,16 +39,18 @@ Import `inputs.ednovas-cloud.nixosModules.default` in your system's `modules` li
     ];
   programs.ednovas-cloud = {
     enable = true;
+    autostart.enable = true;
     tun.enable = true;
+    # tun.passwordless = true;
     # tun.group = "ednovas-cloud";
   };
   users.users.daniel.extraGroups = [ "ednovas-cloud" ];
 }
 ```
 
-If you already allow unfree packages globally, the predicate is unnecessary. Rebuild, then log out and back in if group membership changed. Your desktop must have a Polkit authentication agent; most complete desktop environments supply one, while a standalone window manager may need one configured.
+If you already allow unfree packages globally, the predicate is unnecessary. Rebuild, then log out and back in if group membership changed. Unless `tun.passwordless` is enabled, your desktop must have a Polkit authentication agent; most complete desktop environments supply one, while a standalone window manager may need one configured.
 
-Launch **EdNovasCloud** / `ednovas-cloud` for proxy mode as your user. Launch **EdNovas Cloud (Privileged TUN)** / `ednovas-cloud-tun` to authenticate and run the GUI and core as root. The latter requires membership in the configured group, an active local desktop session, and administrator authentication. It does not grant passwordless access. Sign in to its separate profile and enable TUN in the GUI.
+Launch **EdNovasCloud** / `ednovas-cloud` for proxy mode as your user. Launch **EdNovas Cloud (Privileged TUN)** / `ednovas-cloud-tun` to run the GUI and core as root. The latter requires membership in the configured group and an active local desktop session. Administrator authentication is required by default. Set `tun.passwordless = true` to authorize both manual launches and login autostart without entering an administrator password. This grants the configured group password-free access to the fixed privileged EdNovas launcher. Sign in to its separate profile and enable TUN in the GUI.
 
 Privileged profiles live in `/var/lib/ednovas-cloud/<caller-uid>/` with root ownership and mode `0700`. They have a separate HOME, config, cache, and data directory plus an explicit Electron user-data directory. The application shares the host `/tmp` so the desktop's user-owned StatusNotifier host can read temporary tray icon files. Your existing credentials and subscription state are not copied automatically.
 
@@ -62,10 +64,14 @@ The privileged FHS runtime shares the host network and preserves root capabiliti
 | --- | --- |
 | `programs.ednovas-cloud.enable` | `false` |
 | `programs.ednovas-cloud.package` | Bundled flake package |
+| `programs.ednovas-cloud.autostart.enable` | `false` |
 | `programs.ednovas-cloud.tun.enable` | `false` |
+| `programs.ednovas-cloud.tun.passwordless` | `false` |
 | `programs.ednovas-cloud.tun.group` | `"ednovas-cloud"` |
 
-Custom packages must support `.override { privileged = true; }`. The `ednovas-cloud-privileged-runtime` flake package is an internal runtime for the authenticated launcher; use the NixOS module to launch TUN. This branch has no Home Manager module and no autostart at boot or login.
+Set `autostart.enable = true` to launch at graphical login in desktop sessions supporting XDG autostart. This installs a system-wide entry in `/etc/xdg/autostart/ednovas-cloud.desktop`. With `tun.enable = true`, it starts the privileged TUN launcher and requests administrator authentication unless `tun.passwordless = true`; the logged-in user must belong to `tun.group`. Otherwise, it starts the ordinary proxy launcher. Standalone window managers must run an XDG autostart implementation to use this entry.
+
+Custom packages must support `.override { privileged = true; }` and provide `share/applications/ednovas-cloud.desktop` for proxy autostart. The `ednovas-cloud-privileged-runtime` flake package is an internal runtime for the authenticated launcher; use the NixOS module to launch TUN. This branch has no Home Manager module and does not start the app at boot.
 
 ## Check and update releases
 
@@ -115,6 +121,8 @@ The GUI suites use Openbox/X11 and a separate niri/Wayland compositor with softw
 
 The network suite runs both extracted bundled Mihomo cores in the production FHS environment with the same namespace and capability settings. A second VM serves unique tokens over HTTP. It checks HTTP/SOCKS responses, direct requests through TUN with matching captured request and response bytes, and route/interface cleanup plus direct connectivity after graceful core shutdown. Fixture-only policy rules send unmarked requests through TUN while marked core sockets retain their LAN route; these rules are removed during teardown. Routing changes remain inside the guests. This is **bundled-core coverage**; it does not prove the logged-in GUI generates or applies a working subscription configuration.
 
+Both GUI suites also switch to `tun.passwordless = true`, verify that the privileged app launches without password entry and retains hide/restore/quit behavior, and confirm that a user outside the configured group is still denied.
+
 Server-configuration dialog interaction, subscription loading, authenticated GUI connections, authenticated profile migration and GPU-specific behavior remain manual checks. See the [NixOS test framework](https://nixos.org/manual/nixos/stable/#sec-nixos-tests) and [Mihomo TUN configuration](https://wiki.metacubex.one/en/config/inbound/tun/) for the underlying interfaces.
 
 ## Manual usage test
@@ -122,7 +130,7 @@ Server-configuration dialog interaction, subscription loading, authenticated GUI
 Close other EdNovas instances before testing each mode. Keep the ordinary and privileged GUI instances from running concurrently, since their cores can conflict on ports or routing.
 
 - Verify ordinary launch, sign-in, tray, notifications, subscription loading, and proxy traffic.
-- Verify privileged launch requests administrator authentication, sign-in works in the separate profile, and TUN routes traffic.
+- Verify privileged launch requests administrator authentication by default, skips the prompt with `tun.passwordless = true`, sign-in works in the separate profile, and TUN routes traffic.
 - Verify switching nodes and the compatible core, then disable TUN and confirm connectivity is restored.
 - Confirm your ordinary `~/.config/EdNovasCloud` remains owned by your user after privileged launch.
 - Check X11/Wayland and tray behavior in your actual desktop session; root session-bus integration depends on the desktop.

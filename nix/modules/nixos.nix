@@ -72,7 +72,7 @@ let
     exec = lib.getExe tunLauncher;
     icon = "${cfg.package}/share/icons/hicolor/2048x2048/apps/ednovas-cloud.png";
     categories = [ "Network" ];
-    comment = "Authenticate to run EdNovas GUI and network core as root";
+    comment = "Run EdNovas GUI and network core as root";
   };
   policy = pkgs.runCommand "ednovas-cloud-polkit-policy" { } ''
     mkdir -p "$out/share/polkit-1/actions"
@@ -93,6 +93,14 @@ in
 {
   options.programs.ednovas-cloud = {
     enable = lib.mkEnableOption "EdNovas Cloud on NixOS";
+    autostart.enable = lib.mkEnableOption "EdNovas Cloud at graphical login" // {
+      description = ''
+        Start EdNovas Cloud in desktop sessions supporting XDG autostart.
+        When TUN is enabled, start the privileged launcher, which still
+        requires group membership and, unless tun.passwordless is enabled,
+        administrator authentication.
+      '';
+    };
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs.callPackage ../package.nix { };
@@ -101,16 +109,32 @@ in
     };
     tun = {
       enable = lib.mkEnableOption "authenticated root GUI and core launcher for TUN";
+      passwordless =
+        lib.mkEnableOption "password-free TUN launches for authorized local desktop users"
+        // {
+          description = ''
+            Allow members of tun.group in active local sessions to launch the
+            privileged EdNovas GUI and core without administrator authentication.
+            Applies to both manual launches and graphical login autostart.
+          '';
+        };
       group = lib.mkOption {
         type = lib.types.str;
         default = "ednovas-cloud";
-        description = "Local desktop users allowed to request the privileged launcher; administrator authentication is still required.";
+        description = "Local desktop users allowed to request the privileged launcher; administrator authentication is required unless tun.passwordless is enabled.";
       };
     };
   };
   config = lib.mkIf cfg.enable (
     lib.mkMerge [
       { environment.systemPackages = [ cfg.package ]; }
+      (lib.mkIf cfg.autostart.enable {
+        environment.etc."xdg/autostart/ednovas-cloud.desktop".source =
+          if cfg.tun.enable then
+            "${desktop}/share/applications/ednovas-cloud-tun.desktop"
+          else
+            "${cfg.package}/share/applications/ednovas-cloud.desktop";
+      })
       (lib.mkIf cfg.tun.enable {
         environment.systemPackages = [
           tunLauncher
@@ -124,7 +148,7 @@ in
           polkit.addRule(function(action, subject) {
             if (action.id === ${builtins.toJSON actionId}) {
               if (subject.local && subject.active && subject.isInGroup(${builtins.toJSON cfg.tun.group})) {
-                return polkit.Result.AUTH_ADMIN;
+                return polkit.Result.${if cfg.tun.passwordless then "YES" else "AUTH_ADMIN"};
               }
               return polkit.Result.NO;
             }

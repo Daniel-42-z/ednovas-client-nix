@@ -129,11 +129,11 @@ def Stable(process, root):
         time.sleep(min(3, remaining))
 
 
-def Launch(root, suffix):
+def Launch(root, suffix, passwordless=False):
     command = "ednovas-cloud-tun" if root else "ednovas-cloud --user-data-dir=/home/alice/ordinary"
     flags = f" --disable-gpu --ozone-platform={'wayland' if desktop == 'wayland' else 'x11'} --enable-logging=stderr"
     User(f"run sh -c {shlex.quote(command + flags + ' > /home/alice/' + suffix + '.log 2>&1 &')}")
-    if root:
+    if root and not passwordless:
         Phase("authentication")
         machine.wait_until_succeeds("su - alice -c 'runtime-ui auth-ready'", timeout=120)
         Keyboard("type --clearmodifiers --delay 80 vm-admin-password")
@@ -211,6 +211,23 @@ try:
     # caller's real UID and the module's installed policy.
     machine.succeed("chmod a+x /home/alice; chmod a+r /home/alice/session.json")
     machine.succeed("systemctl start getty@tty2")
+    machine.send_key("ctrl-alt-f2")
+    machine.wait_until_succeeds("loginctl show-user outsider -p State --value | grep '^active$'", timeout=120)
+    machine.fail("timeout 30 su - outsider -c 'runtime-ui run ednovas-cloud-tun --disable-gpu' > /tmp/denied.log 2>&1")
+    machine.succeed("grep -i 'not authorized' /tmp/denied.log")
+    assert not MainProcess(True)
+    machine.succeed("test ! -e /var/lib/ednovas-cloud/1001; test -z \"$(find /run/user/1001 -name 'ednovas-bus.*' 2>/dev/null)\"")
+    Phase("passwordless")
+    machine.succeed("/run/current-system/specialisation/passwordless/bin/switch-to-configuration test")
+    machine.send_key("ctrl-alt-f1")
+    machine.wait_until_succeeds("loginctl show-user alice -p State --value | grep '^active$'", timeout=120)
+    process, originalWindow, emailPoint = Launch(True, "passwordless", passwordless=True)
+    Cycle(process, originalWindow, emailPoint)
+    Quit(process)
+    Phase("passwordless-denial")
+    # System activation restores home permissions; expose the test transport
+    # again so the non-member reaches Polkit rather than failing fixture setup.
+    machine.succeed("chmod a+x /home/alice; chmod a+r /home/alice/session.json")
     machine.send_key("ctrl-alt-f2")
     machine.wait_until_succeeds("loginctl show-user outsider -p State --value | grep '^active$'", timeout=120)
     machine.fail("timeout 30 su - outsider -c 'runtime-ui run ednovas-cloud-tun --disable-gpu' > /tmp/denied.log 2>&1")
