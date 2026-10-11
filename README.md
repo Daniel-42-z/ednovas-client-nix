@@ -26,7 +26,7 @@ The AppImage is extracted at build time using one decompression thread, with no 
 Add this input to your system flake during local testing:
 
 ```nix
-inputs.ednovas-cloud.url = "path:/home/daniel/Projects/ednovas-client";
+inputs.ednovas-cloud.url = "github:Daniel-42-z/ednovas-client-nix";
 ```
 
 Import `inputs.ednovas-cloud.nixosModules.default` in your system's `modules` list, then configure:
@@ -44,7 +44,7 @@ Import `inputs.ednovas-cloud.nixosModules.default` in your system's `modules` li
     # tun.passwordless = true;
     # tun.group = "ednovas-cloud";
   };
-  users.users.daniel.extraGroups = [ "ednovas-cloud" ];
+  users.users.your-username.extraGroups = [ "ednovas-cloud" ];
 }
 ```
 
@@ -60,14 +60,14 @@ Both launchers use a fixed Fontconfig configuration with bundled Noto CJK Sans f
 
 The privileged FHS runtime shares the host network and preserves root capabilities so TUN changes affect the host. The module loads `tun` and defaults reverse path filtering to `"loose"`. No per-core capability wrappers are installed. Setting `tun.enable = false` installs only the ordinary launcher.
 
-| Option | Default |
-| --- | --- |
-| `programs.ednovas-cloud.enable` | `false` |
-| `programs.ednovas-cloud.package` | Bundled flake package |
-| `programs.ednovas-cloud.autostart.enable` | `false` |
-| `programs.ednovas-cloud.tun.enable` | `false` |
-| `programs.ednovas-cloud.tun.passwordless` | `false` |
-| `programs.ednovas-cloud.tun.group` | `"ednovas-cloud"` |
+| Option                                    | Default               |
+| ----------------------------------------- | --------------------- |
+| `programs.ednovas-cloud.enable`           | `false`               |
+| `programs.ednovas-cloud.package`          | Bundled flake package |
+| `programs.ednovas-cloud.autostart.enable` | `false`               |
+| `programs.ednovas-cloud.tun.enable`       | `false`               |
+| `programs.ednovas-cloud.tun.passwordless` | `false`               |
+| `programs.ednovas-cloud.tun.group`        | `"ednovas-cloud"`     |
 
 Set `autostart.enable = true` to launch at graphical login in desktop sessions supporting XDG autostart. This installs a system-wide entry in `/etc/xdg/autostart/ednovas-cloud.desktop`. With `tun.enable = true`, it starts the privileged TUN launcher and requests administrator authentication unless `tun.passwordless = true`; the logged-in user must belong to `tun.group`. Otherwise, it starts the ordinary proxy launcher. Standalone window managers must run an XDG autostart implementation to use this entry.
 
