@@ -6,7 +6,9 @@ from pathlib import Path
 import subprocess
 import sys
 from dbus_next.aio import MessageBus
-from dbus_next import Variant
+from dbus_next import DBusError, Variant
+from dbus_next.errors import InterfaceNotFoundError
+from dbus_next.introspection import Node
 
 
 def Run(args):
@@ -38,40 +40,106 @@ def Windows():
     return windows
 
 
+# Native Electron tray/menu objects implement these standard methods even
+# when they do not advertise interfaces through Introspect.
+trayProtocol = Node.parse("""<node>
+  <interface name="org.freedesktop.DBus.Properties">
+    <method name="Get">
+      <arg type="s" direction="in"/><arg type="s" direction="in"/>
+      <arg type="v" direction="out"/>
+    </method>
+  </interface>
+  <interface name="org.kde.StatusNotifierItem">
+    <method name="Activate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  </interface>
+</node>""")
+menuProtocol = Node.parse("""<node>
+  <interface name="com.canonical.dbusmenu">
+    <method name="GetLayout">
+      <arg type="i" direction="in"/><arg type="i" direction="in"/><arg type="as" direction="in"/>
+      <arg type="u" direction="out"/><arg type="(ia{sv}av)" direction="out"/>
+    </method>
+    <method name="Event">
+      <arg type="i" direction="in"/><arg type="s" direction="in"/>
+      <arg type="v" direction="in"/><arg type="u" direction="in"/>
+    </method>
+  </interface>
+</node>""")
+
+
+def MenuItems(layout):
+    yield layout
+    for child in layout[2]:
+        yield from MenuItems(child.value)
+
+
 async def Tray(command):
     bus = await MessageBus().connect()
-    watcherName = "org.kde.StatusNotifierWatcher"
-    watcherPath = "/StatusNotifierWatcher"
-    obj = bus.get_proxy_object(watcherName, watcherPath, await bus.introspect(watcherName, watcherPath))
-    items = (await obj.get_interface("org.freedesktop.DBus.Properties").call_get(
-        watcherName, "RegisteredStatusNotifierItems")).value
-    for item in items:
-        service, path = item.split("/", 1)
-        path = "/" + path
-        try:
-            obj = bus.get_proxy_object(service, path, await bus.introspect(service, path))
-            props = obj.get_interface("org.freedesktop.DBus.Properties")
-            if (await props.call_get("org.kde.StatusNotifierItem", "Id")).value != "ednovas-cloud-tun":
+    try:
+        dbusName = "org.freedesktop.DBus"
+        dbus = bus.get_proxy_object(dbusName, "/org/freedesktop/DBus",
+                                   await bus.introspect(dbusName, "/org/freedesktop/DBus"))
+        connections = dbus.get_interface(dbusName)
+        watcherName = "org.kde.StatusNotifierWatcher"
+        watcherPath = "/StatusNotifierWatcher"
+        obj = bus.get_proxy_object(watcherName, watcherPath, await bus.introspect(watcherName, watcherPath))
+        items = (await obj.get_interface("org.freedesktop.DBus.Properties").call_get(
+            watcherName, "RegisteredStatusNotifierItems")).value
+        liveItems = {}
+        for item in items:
+            service, path = item.split("/", 1)
+            path = "/" + path
+            try:
+                owner = await connections.call_get_name_owner(service)
+                pid = await connections.call_get_connection_unix_process_id(owner)
+                process = Path("/proc", str(pid))
+                args = (process / "cmdline").read_bytes().decode().split("\0")
+                executable = Path(args[0]).name
+                nativeProcess = executable == "ednovas-cloud"
+                # D-Bus reports the relay PID for clients using our session
+                # proxy. Require EdNovas properties on that live connection.
+                proxyProcess = (executable == "xdg-dbus-proxy"
+                                and process.stat().st_uid == os.getuid()
+                                and any(arg.startswith(f"/run/user/{os.getuid()}/ednovas-bus.")
+                                        and arg.endswith("/bus") for arg in args))
+                if (process.stat().st_uid not in {0, os.getuid()}
+                        or not (nativeProcess or proxyProcess)):
+                    continue
+                obj = bus.get_proxy_object(service, path, trayProtocol)
+                props = obj.get_interface("org.freedesktop.DBus.Properties")
+                identity = (await props.call_get("org.kde.StatusNotifierItem", "Id")).value
+                title = (await props.call_get("org.kde.StatusNotifierItem", "Title")).value
+                # Electron may use a generic appindicator Id and an empty
+                # title. The dedicated EdNovas relay is also an identity.
+                if ("ednovas" not in (identity + title).lower()
+                        and not proxyProcess
+                        and not any(arg.startswith("--tray-helper=") for arg in args)):
+                    continue
+                liveItems[(owner, path)] = (obj, props, pid, identity, title)
+            except (OSError, ValueError, DBusError, InterfaceNotFoundError) as error:
+                # Watchers can retain entries after their owner exits. Actions
+                # occur outside this block so an action failure cannot be hidden.
+                print(f"Tray lookup skipped {item}: {error}", file=sys.stderr)
                 continue
-            if command == "activate":
-                await obj.get_interface("org.kde.StatusNotifierItem").call_activate(0, 0)
-            elif command == "quit":
-                menuPath = (await props.call_get("org.kde.StatusNotifierItem", "Menu")).value
-                menu = bus.get_proxy_object(service, menuPath, await bus.introspect(service, menuPath))
-                interface = menu.get_interface("com.canonical.dbusmenu")
-                layout = await interface.call_get_layout(0, -1, [])
-                quitItem = next(child.value for child in layout[1][2]
-                                if child.value[1]["label"].value == "Quit EdNovas Cloud")
-                await interface.call_event(quitItem[0], "clicked", Variant("s", ""), 0)
-            print(json.dumps({"service": service, "path": path, "items": items}))
-            bus.disconnect()
-            return
-        except Exception:
-            # The test host can retain an entry whose D-Bus owner exited.
-            # Only a live item with the expected Id may receive an action.
-            continue
-    bus.disconnect()
-    sys.exit("No live registered privileged tray item")
+        assert len(liveItems) == 1, f"Expected one native EdNovas tray, found {list(liveItems)} among {items}"
+        (service, path), (obj, props, pid, identity, title) = next(iter(liveItems.items()))
+        if command == "activate":
+            await obj.get_interface("org.kde.StatusNotifierItem").call_activate(0, 0)
+        elif command == "quit":
+            menuPath = (await props.call_get("org.kde.StatusNotifierItem", "Menu")).value
+            menu = bus.get_proxy_object(service, menuPath, menuProtocol)
+            interface = menu.get_interface("com.canonical.dbusmenu")
+            layout = await interface.call_get_layout(0, -1, [])
+            quitItems = [entry for entry in MenuItems(layout[1])
+                         if any(word in entry[1].get("label", Variant("s", "")).value.lower()
+                                for word in ["quit", "exit", "退出"])
+                         and entry[1].get("enabled", Variant("b", True)).value]
+            assert len(quitItems) == 1, f"Expected one quit menu item: {layout}"
+            await interface.call_event(quitItems[0][0], "clicked", Variant("s", ""), 0)
+        print(json.dumps({"service": service, "path": path, "pid": pid,
+                          "id": identity, "title": title, "items": items}))
+    finally:
+        bus.disconnect()
 
 
 async def DesktopRun(args):

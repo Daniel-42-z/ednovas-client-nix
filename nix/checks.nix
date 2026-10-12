@@ -43,7 +43,7 @@ in
   package-privileged = rootPackage;
   module-evaluation =
     assert rootPackage.privileged && !appPackage.privileged;
-    assert toString rootPackage.appimageContents != toString appPackage.appimageContents;
+    assert toString rootPackage.appimageContents == toString appPackage.appimageContents;
     assert !rootPackage.args.privateTmp && !appPackage.args.privateTmp;
     assert !rootPackage.args.unshareUser && !rootPackage.args.unshareNet;
     assert
@@ -81,6 +81,7 @@ in
         nativeBuildInputs = [
           pkgs.python3
           pkgs.nodejs
+          pkgs.squashfsTools
         ];
       }
       ''
@@ -108,10 +109,20 @@ in
           }
         }
         JS
+        offset=$(python3 ${../scripts/appimage.py} ${appPackage.src} ${
+          lib.escapeShellArg
+            (builtins.fromJSON (builtins.readFile ./release.json)).sources.${system}.appImageArchitecture
+        })
+        unsquashfs -cat -o "$offset" ${appPackage.src} resources/app.asar > upstream.asar
+        cmp upstream.asar ${appPackage.appimageContents}/resources/app.asar
+        cmp upstream.asar ${rootPackage.appimageContents}/resources/app.asar
         test -x ${lib.getExe launcher}
         grep -F '/run/wrappers/bin/pkexec' ${lib.getExe launcher}
         grep -F '/bin/xdg-dbus-proxy' ${lib.getExe launcher}
-        grep -F 'tray.py' ${lib.getExe launcher}
+        if grep -E 'tray.py|FONTCONFIG_FILE' ${lib.getExe launcher} ${lib.getExe appPackage} ${lib.getExe rootPackage}; then
+          echo 'Unexpected custom tray or Fontconfig override' >&2
+          exit 1
+        fi
         grep -Fx 'Exec=${lib.getExe appPackage} %U' ${
           proxyAutostart.environment.etc."xdg/autostart/ednovas-cloud.desktop".source
         }
@@ -141,10 +152,7 @@ in
     pkgs.runCommand "ednovas-privileged-script-checks"
       {
         nativeBuildInputs = [
-          (pkgs.python3.withPackages (pythonPkgs: [
-            pythonPkgs.dbus-next
-            pythonPkgs.pillow
-          ]))
+          pkgs.python3
           pkgs.bash
           pkgs.jq
           pkgs.gitMinimal

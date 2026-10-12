@@ -49,6 +49,10 @@ def ValidateSession(session, callerUid):
             or proxyDirectoryStat.st_mode & 0o077
             or not stat.S_ISSOCK(proxyStat.st_mode) or proxyStat.st_uid != callerUid):
         raise ValueError("Desktop bus proxy has an unexpected owner or type")
+    fontConfigStat = proxySocket.with_name("fonts.conf").lstat()
+    if (not stat.S_ISREG(fontConfigStat.st_mode) or fontConfigStat.st_uid != callerUid
+            or fontConfigStat.st_mode & 0o077):
+        raise ValueError("Desktop font configuration has an unexpected owner or type")
     authority = session.get("XAUTHORITY", "")
     if authority:
         authorityPath = Path(authority)
@@ -89,7 +93,8 @@ def BuildEnvironment(session, callerUid, profile, runtimeDirectory):
         "XDG_RUNTIME_DIR": str(runtimeDirectory),
         "DBUS_SESSION_BUS_ADDRESS": f"unix:path={proxySocket}",
         "ELECTRON_ENABLE_LOGGING": "1",
-        "EDNOVAS_CONTROL_SOCKET": str(Path(proxySocket).with_name("control")),
+        # Upstream uses the authenticated caller to spawn its native tray helper.
+        "PKEXEC_UID": str(callerUid),
     }
 
 
@@ -109,6 +114,16 @@ def Main():
     EnsurePrivateDirectory(profile)
     for name in ["home", "config", "cache", "data", "profile"]:
         EnsurePrivateDirectory(profile / name)
+    fontConfigDirectory = profile / "config/fontconfig"
+    EnsurePrivateDirectory(fontConfigDirectory)
+    fontConfigIncludes = fontConfigDirectory / "conf.d"
+    EnsurePrivateDirectory(fontConfigIncludes)
+    fontConfigLink = fontConfigIncludes / "50-ednovas-desktop.conf"
+    if fontConfigLink.is_symlink():
+        fontConfigLink.unlink()
+    elif fontConfigLink.exists():
+        raise ValueError("Desktop font configuration link has an unexpected type")
+    fontConfigLink.symlink_to(Path(session["EDNOVAS_DBUS_PROXY_SOCKET"]).with_name("fonts.conf"))
     EnsurePrivateDirectory(runtimeBase)
     runtimeDirectory = runtimeBase / str(callerUid)
     EnsurePrivateDirectory(runtimeDirectory)

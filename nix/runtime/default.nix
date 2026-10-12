@@ -25,6 +25,33 @@ let
         runScript = "${appPackage.appimageContents}/resources/bin/${core}";
       }
     );
+  fonts = pkgs.buildFHSEnv (
+    builtins.removeAttrs rootPackage.args [
+      "pname"
+      "src"
+      "contents"
+      "extraInstallCommands"
+      "nativeBuildInputs"
+      "passthru"
+      "meta"
+    ]
+    // {
+      name = "runtime-fonts";
+      runScript = pkgs.writeShellScript "runtime-font-match" ''
+        exec ${pkgs.python3}/bin/python3 -I ${./fonts.py} ${../../scripts/fontconfig.py} "$@"
+      '';
+    }
+  );
+  userFontsConf = pkgs.writeText "runtime-user-fonts.conf" ''
+    <fontconfig>
+      <dir>${pkgs.noto-fonts-cjk-sans}/share/fonts</dir>
+      <dir>${pkgs.nerd-fonts.symbols-only}/share/fonts</dir>
+      <alias binding="same">
+        <family>sans-serif</family>
+        <prefer><family>Liberation Sans</family><family>Noto Sans CJK SC</family></prefer>
+      </alias>
+    </fontconfig>
+  '';
   core = CoreHarness "EdNovas-Core";
   compatibleCore = CoreHarness "EdNovas-Core-compatible";
   testPython = pkgs.python3.withPackages (p: [ p.dbus-next ]);
@@ -102,10 +129,24 @@ let
               ];
               virtualisation.memorySize = 4096;
               hardware.graphics.enable = true;
-              fonts.packages = [ pkgs.noto-fonts-cjk-sans ];
+              fonts.enableDefaultPackages = false;
+              fonts.packages = lib.mkForce [ pkgs.dejavu_fonts ];
+              # Reproduce Home Manager-only fonts: the system has no CJK or
+              # Nerd Fonts, and a custom font is installed under XDG_DATA_HOME.
+              systemd.tmpfiles.rules = [
+                "d /home/alice/.config 0700 alice users -"
+                "d /home/alice/.config/fontconfig 0700 alice users -"
+                "d /home/alice/.config/fontconfig/conf.d 0700 alice users -"
+                "L+ /home/alice/.config/fontconfig/conf.d/10-hm-fonts.conf - alice users - ${userFontsConf}"
+                "d /home/alice/.local 0700 alice users -"
+                "d /home/alice/.local/share 0700 alice users -"
+                "L+ /home/alice/.local/share/fonts - alice users - ${pkgs.liberation_ttf}/share/fonts"
+              ];
               environment.systemPackages = [
                 session
                 ui
+                fonts
+                pkgs.fontconfig
                 pkgs.xwininfo
                 pkgs.xdotool
                 pkgs.wmctrl

@@ -7,8 +7,6 @@
   squashfsTools,
   appimageTools,
   makeWrapper,
-  makeFontsConf,
-  noto-fonts-cjk-sans,
   privileged ? false,
 }:
 let
@@ -18,11 +16,6 @@ let
       or (throw "EdNovas Cloud: no source for ${stdenv.hostPlatform.system}");
   pname = if privileged then "ednovas-cloud-privileged-runtime" else "ednovas-cloud";
   src = fetchurl { inherit (source) url hash; };
-  # pkexec deliberately drops the caller's Fontconfig environment and the root
-  # profile cannot rely on fonts installed in the caller's home directory.
-  fontsConf = makeFontsConf {
-    fontDirectories = [ noto-fonts-cjk-sans ];
-  };
   appimageContents =
     runCommand "ednovas-cloud-${release.version}-upstream"
       {
@@ -36,9 +29,6 @@ let
         unsquashfs -processors 1 -no-progress -o "$offset" -d "$out" ${src}
         grep -Fx ${lib.escapeShellArg "X-AppImage-Version=${release.version}"} "$out/ednovas-cloud.desktop"
         test -s "$out/resources/app.asar"
-        ${lib.optionalString privileged ''
-          python3 ${../scripts/patch-asar.py} "$out/resources/app.asar" ${../scripts/window-shim.js} --version ${release.version}
-        ''}
         test -x "$out/resources/bin/EdNovas-Core"
         test -x "$out/resources/bin/EdNovas-Core-compatible"
       '';
@@ -51,6 +41,7 @@ appimageTools.wrapAppImage {
   extraPkgs = pkgs: [
     pkgs.procps
     pkgs.psmisc
+    pkgs.getent
     pkgs.libappindicator-gtk3
     pkgs.libnotify
   ];
@@ -69,7 +60,6 @@ appimageTools.wrapAppImage {
   extraInstallCommands = ''
     mv "$out/bin/${pname}" "$out/bin/.${pname}-fhs"
     makeWrapper "$out/bin/.${pname}-fhs" "$out/bin/${pname}" \
-      --set FONTCONFIG_FILE ${fontsConf} \
       --add-flags --no-sandbox
     ${lib.optionalString (!privileged) ''
       mkdir -p "$out/share/applications" "$out/share/icons/hicolor/2048x2048/apps"
@@ -80,7 +70,7 @@ appimageTools.wrapAppImage {
         --replace-fail 'Icon=ednovas-cloud' "Icon=$out/share/icons/hicolor/2048x2048/apps/ednovas-cloud.png"
     ''}
   '';
-  passthru = { inherit privileged appimageContents fontsConf; };
+  passthru = { inherit privileged appimageContents; };
   meta = {
     description = "Unmodified upstream EdNovas Cloud AppImage in an FHS runtime";
     homepage = "https://download.ednovas.org/";

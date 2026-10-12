@@ -1,10 +1,9 @@
-"""Insert a reviewed loader shim without rewriting upstream V8 bytecode."""
-
-import argparse
+"""Inject acceptance-only faults into a disposable upstream archive."""
 import hashlib
 import json
 from pathlib import Path
 import struct
+import sys
 
 
 def ReadArchive(archiveData):
@@ -64,34 +63,26 @@ def WriteArchive(header, contents):
     return struct.pack("<II", 4, len(headerPickle)) + headerPickle + b"".join(dataParts)
 
 
-def PatchArchive(archiveData, shimData, version, tunSupport):
+def InjectFault(archiveData, fault):
     header, contents = ReadArchive(archiveData)
-    packageData = json.loads(contents["package.json"])
-    if packageData["version"] != version or packageData["main"] != "dist-electron/main.js":
-        raise ValueError("Upstream version or entrypoint changed; review the integration")
-    loader = contents["dist-electron/main.js"].decode().strip()
-    if loader != "'use strict';\nrequire('bytenode');\nrequire('./main.jsc');":
-        raise ValueError("Upstream loader changed; review the integration")
-    if not contents.get("dist-electron/main.jsc"):
-        raise ValueError("Upstream bytecode is missing")
-    contents["dist-electron/main.js"] = (
-        b"'use strict';\n" + shimData
-        + b"\nrequire('bytenode');\nrequire('./main.jsc');\n"
-    )
+    if fault == "renderer":
+        assert "dist/index.html" in contents
+        contents["dist/index.html"] = b"<!doctype html><html><body>Renderer deliberately unavailable</body></html>"
+    else:
+        hooks = {
+            "close": "app.on('browser-window-created', (_event, window) => { window.prependListener('close', event => { event.preventDefault = () => {}; }); });",
+            "restore": "app.on('browser-window-created', (_event, window) => { window.on('hide', () => { window.show = () => {}; }); });",
+            "quit": "app.on('before-quit', event => event.preventDefault()); app.exit = () => {};",
+        }
+        loader = contents["dist-electron/main.js"]
+        assert loader.strip() == b"'use strict';\nrequire('bytenode');\nrequire('./main.jsc');"
+        contents["dist-electron/main.js"] = (
+            b"'use strict';\nconst { app } = require('electron');\n"
+            + hooks[fault].encode() + b"\n" + loader
+        )
     return WriteArchive(header, contents)
 
 
-def Main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("archive", type=Path)
-    parser.add_argument("shim", type=Path)
-    parser.add_argument("--version", required=True)
-    parser.add_argument("--tun-support", action="store_true")
-    args = parser.parse_args()
-    patchedData = PatchArchive(args.archive.read_bytes(), args.shim.read_bytes(),
-                               args.version, args.tun_support)
-    args.archive.write_bytes(patchedData)
-
-
 if __name__ == "__main__":
-    Main()
+    archivePath = Path(sys.argv[1])
+    archivePath.write_bytes(InjectFault(archivePath.read_bytes(), sys.argv[2]))

@@ -122,7 +122,7 @@ def Stable(process, root):
         assert len(Windows()) == 1, "Primary window lost or duplicated"
         if root:
             User("tray")
-            machine.succeed("test $(find /run/user/1000 -path '*/ednovas-bus.*/control' -type s | wc -l) -eq 1")
+            machine.succeed("pgrep -u alice -f 'ednovas-cloud.*--tray-helper='")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return
@@ -145,8 +145,8 @@ def Launch(root, suffix, passwordless=False):
     Wait(lambda: len(MainProcess(root)) == 1, 120)
     process = MainProcess(root)[0]
     if root:
+        machine.wait_until_succeeds("pgrep -u alice -f 'ednovas-cloud.*--tray-helper='", timeout=120)
         machine.wait_until_succeeds("su - alice -c 'runtime-ui tray'", timeout=120)
-        machine.wait_until_succeeds("test $(find /run/user/1000 -path '*/ednovas-bus.*/control' -type s | wc -l) -eq 1", timeout=120)
     Stable(process, root)
     Interact(emailPoint)
     return process, Windows()[0]["id"], emailPoint
@@ -162,7 +162,7 @@ def Cycle(process, originalWindow, emailPoint):
     for _ in range(3):
         assert Alive(process), "Close exited original application"
         User("tray")
-        machine.succeed("test $(find /run/user/1000 -path '*/ednovas-bus.*/control' -type s | wc -l) -eq 1; pgrep -u alice -f tray.py; pgrep -u alice -f xdg-dbus-proxy")
+        machine.succeed("pgrep -u alice -f xdg-dbus-proxy")
         time.sleep(1)
     Phase("restore")
     User("activate")
@@ -178,9 +178,8 @@ def Quit(process):
     User("quit")
     Wait(lambda: not Alive(process))
     Wait(lambda: not Windows())
-    machine.wait_until_fails("pgrep -u alice -f 'tray.py|xdg-dbus-proxy'", timeout=30)
+    machine.wait_until_fails("pgrep -u alice -f 'ednovas-cloud.*--tray-helper=|xdg-dbus-proxy'", timeout=30)
     machine.succeed("test -z \"$(find /run/user/1000 -maxdepth 1 -name 'ednovas-bus.*')\"")
-    machine.succeed("test -z \"$(find /run/user/1000 -path '*/ednovas-bus.*/control')\"")
     machine.fail("su - alice -c 'runtime-ui tray'")
 
 
@@ -191,6 +190,16 @@ try:
     machine.wait_until_succeeds("pgrep -u alice -f lxqt-policykit-agent", timeout=120)
     if desktop == "wayland":
         machine.wait_until_succeeds("su - alice -c 'DISPLAY=:0 XAUTHORITY=/home/alice/.Xauthority wmctrl -r niri -b add,fullscreen && wmctrl -a niri'", timeout=120)
+    Phase("fonts")
+    assert not machine.succeed("fc-list -f '%{file}\\n' ':charset=4e91'").strip(), "Fixture must not install system CJK fonts"
+    for pattern in ["sans-serif", "sans-serif:lang=zh-cn:charset=4e91", "Symbols Nerd Font:charset=f013"]:
+        userCommand = "fc-match -f '%{family}|%{file}\\n' " + shlex.quote(pattern)
+        callerMatch = machine.succeed("su - alice -c " + shlex.quote(userCommand))
+        runtimeMatch = machine.succeed("runtime-fonts " + shlex.quote(pattern))
+        assert runtimeMatch == callerMatch, (pattern, callerMatch, runtimeMatch)
+    assert "Liberation Sans" in machine.succeed("runtime-fonts sans-serif")
+    assert "Noto Sans CJK SC" in machine.succeed("runtime-fonts 'sans-serif:charset=4e91'")
+    assert "Symbols Nerd Font" in machine.succeed("runtime-fonts 'Symbols Nerd Font:charset=f013'")
     ordinaryProcess, _, _ = Launch(False, "ordinary")
     machine.succeed(f"kill {ordinaryProcess['pid']}")
     machine.wait_until_fails(f"kill -0 {ordinaryProcess['pid']}", timeout=30)

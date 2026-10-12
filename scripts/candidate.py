@@ -91,7 +91,7 @@ def ValidationSource():
     digest = hashlib.sha256()
     paths = [Path("flake.nix"), Path("flake.lock"), Path("nix/checks.nix"), Path("nix/package.nix"), Path("nix/modules/nixos.nix")]
     paths += list(Path("nix/runtime").glob("*"))
-    paths += [Path("scripts") / name for name in ["patch-asar.py", "window-shim.js", "root-helper.py", "tray.py", "validate.sh", "runtime-fault.py", "runtime-preflight.py", "candidate.py", "ci-update.sh"]]
+    paths += [Path("scripts") / name for name in ["root-helper.py", "fontconfig.py", "validate.sh", "runtime-fault.py", "runtime-preflight.py", "candidate.py", "ci-update.sh"]]
     paths += list(Path(".github/workflows").glob("*.yml"))
     for path in sorted(paths):
         if path.is_file():

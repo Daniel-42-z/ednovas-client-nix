@@ -15,10 +15,6 @@ let
       pkgs.psmisc
     ];
   };
-  trayPython = pkgs.python3.withPackages (pythonPkgs: [
-    pythonPkgs.dbus-next
-    pythonPkgs.pillow
-  ]);
   rootHelper = pkgs.writeShellScriptBin "ednovas-cloud-root" ''
     exec ${pkgs.python3}/bin/python3 -I ${helperSource} "$@"
   '';
@@ -34,12 +30,7 @@ let
     proxySocket="$proxyDirectory/bus"
     ${pkgs.xdg-dbus-proxy}/bin/xdg-dbus-proxy "$DBUS_SESSION_BUS_ADDRESS" "$proxySocket" &
     proxyPid=$!
-    trayPid=""
     cleanup() {
-      if [[ -n "$trayPid" ]]; then
-        kill "$trayPid" 2>/dev/null || true
-        wait "$trayPid" 2>/dev/null || true
-      fi
       kill "$proxyPid" 2>/dev/null || true
       wait "$proxyPid" 2>/dev/null || true
       ${pkgs.coreutils}/bin/rm -rf -- "$proxyDirectory"
@@ -57,12 +48,8 @@ let
       echo 'EdNovas: session bus proxy did not become ready' >&2
       exit 1
     fi
+    ${pkgs.python3}/bin/python3 -I ${../../scripts/fontconfig.py} "$proxyDirectory/fonts.conf"
     export EDNOVAS_DBUS_PROXY_SOCKET="$proxySocket"
-    # The root GUI does not reliably publish a tray item on Wayland. Keep a
-    # user-owned notifier alive for exactly the authenticated GUI's lifetime.
-    ${trayPython}/bin/python3 ${../../scripts/tray.py} \
-      ${cfg.package}/share/icons/hicolor/2048x2048/apps/ednovas-cloud.png "$proxyDirectory/control" &
-    trayPid=$!
     sessionJson=$(${pkgs.python3}/bin/python3 -I -c 'import json, os; print(json.dumps({key: os.environ[key] for key in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "LANG", "EDNOVAS_DBUS_PROXY_SOCKET"] if key in os.environ}))')
     /run/wrappers/bin/pkexec ${lib.getExe rootHelper} "$sessionJson" "$@"
   '';

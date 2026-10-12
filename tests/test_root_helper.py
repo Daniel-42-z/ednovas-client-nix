@@ -21,6 +21,7 @@ class RootHelperTests(unittest.TestCase):
     def test_session_rejects_code_loading_environment_and_foreign_sockets(self):
         with patch.object(Path, 'lstat', return_value=SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=1000)):
             for session in [{'DISPLAY': ':0', 'LD_PRELOAD': '/tmp/evil.so'},
+                            {'DISPLAY': ':0', 'PKEXEC_UID': '1001'},
                             {'DISPLAY': 'remote:0'}, {'WAYLAND_DISPLAY': '../other/socket'},
                             {'WAYLAND_DISPLAY': '..'},
                             {'DISPLAY': ':0', 'EDNOVAS_DBUS_PROXY_SOCKET': '/tmp/bus'},
@@ -30,11 +31,21 @@ class RootHelperTests(unittest.TestCase):
         directoryInfo = SimpleNamespace(st_mode=stat.S_IFDIR | 0o700, st_uid=1000)
         socketInfo = SimpleNamespace(st_mode=stat.S_IFSOCK | 0o700, st_uid=1000)
         socketPath = '/run/user/1000/ednovas-bus.ABCDEFGH/bus'
+        fontInfo = SimpleNamespace(st_mode=stat.S_IFREG | 0o600, st_uid=1000)
         def FakeLstat(path):
+            if path.name == 'fonts.conf':
+                return fontInfo
             return socketInfo if str(path) == socketPath else directoryInfo
         with patch.object(Path, 'lstat', autospec=True, side_effect=FakeLstat):
             session = {'WAYLAND_DISPLAY': 'wayland-1', 'EDNOVAS_DBUS_PROXY_SOCKET': socketPath}
             self.assertEqual(rootHelper.ValidateSession(session, 1000), session)
+        for mode, owner in [(stat.S_IFLNK | 0o600, 1000), (stat.S_IFREG | 0o644, 1000),
+                            (stat.S_IFREG | 0o600, 1001)]:
+            fontInfo.st_mode, fontInfo.st_uid = mode, owner
+            with patch.object(Path, 'lstat', autospec=True, side_effect=FakeLstat):
+                with self.assertRaises(ValueError):
+                    rootHelper.ValidateSession(session, 1000)
+        fontInfo.st_mode, fontInfo.st_uid = stat.S_IFREG | 0o600, 1000
         directoryInfo.st_uid = 1001
         with patch.object(Path, 'lstat', autospec=True, side_effect=FakeLstat):
             with self.assertRaises(ValueError):
@@ -47,7 +58,9 @@ class RootHelperTests(unittest.TestCase):
         self.assertEqual(env['XDG_RUNTIME_DIR'], '/run/ednovas-cloud/1000')
         self.assertEqual(env['WAYLAND_DISPLAY'], '/run/user/1000/wayland-1')
         self.assertEqual(env['DBUS_SESSION_BUS_ADDRESS'], 'unix:path=/run/user/1000/ednovas-bus.ABCDEFGH/bus')
-        self.assertEqual(env['EDNOVAS_CONTROL_SOCKET'], '/run/user/1000/ednovas-bus.ABCDEFGH/control')
+        self.assertNotIn('FONTCONFIG_FILE', env)
+        self.assertEqual(env['PKEXEC_UID'], '1000')
+        self.assertNotIn('EDNOVAS_CONTROL_SOCKET', env)
         self.assertNotIn('EDNOVAS_DBUS_PROXY_SOCKET', env)
         self.assertEqual(env['USER'], 'root')
         self.assertNotIn('LD_LIBRARY_PATH', env)

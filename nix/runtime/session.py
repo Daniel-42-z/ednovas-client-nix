@@ -3,9 +3,10 @@ import asyncio
 import json
 import os
 from pathlib import Path
+from dbus_next import Message, MessageType
 from dbus_next.aio import MessageBus
 from dbus_next.constants import PropertyAccess
-from dbus_next.service import ServiceInterface, dbus_property, method
+from dbus_next.service import ServiceInterface, dbus_property, method, signal
 
 
 class Watcher(ServiceInterface):
@@ -13,11 +14,21 @@ class Watcher(ServiceInterface):
         super().__init__("org.kde.StatusNotifierWatcher")
         self.items = []
 
+    @signal()
+    def StatusNotifierItemRegistered(self, item) -> "s":
+        return item
+
+    @method()
+    def RegisterStatusNotifierHost(self, service: "s"):
+        pass
+
     @method()
     def RegisterStatusNotifierItem(self, service: "s"):
-        item = service + "/StatusNotifierItem"
+        Path.home().joinpath("tray-registrations.jsonl").open("a").write(json.dumps({"service": service}) + "\n")
+        item = service if "/" in service else service + "/StatusNotifierItem"
         if item not in self.items:
             self.items.append(item)
+            self.StatusNotifierItemRegistered(item)
 
     @dbus_property(access=PropertyAccess.READ)
     def RegisteredStatusNotifierItems(self) -> "as":
@@ -54,7 +65,24 @@ async def Main():
     sessionEnvironment = dict(os.environ)
     Path.home().joinpath("session.json").write_text(json.dumps(sessionEnvironment))
     bus = await MessageBus().connect()
-    bus.export("/StatusNotifierWatcher", Watcher())
+    watcher = Watcher()
+
+    def RegisterPath(message):
+        if (message.message_type == MessageType.METHOD_CALL
+                and message.path == "/StatusNotifierWatcher"
+                and message.interface == "org.kde.StatusNotifierWatcher"
+                and message.member == "RegisterStatusNotifierItem"
+                and message.signature == "s" and message.body[0].startswith("/")):
+            Path.home().joinpath("tray-registrations.jsonl").open("a").write(
+                json.dumps({"sender": message.sender, "path": message.body[0]}) + "\n")
+            item = message.sender + message.body[0]
+            if item not in watcher.items:
+                watcher.items.append(item)
+                watcher.StatusNotifierItemRegistered(item)
+            return Message.new_method_return(message)
+
+    bus.add_message_handler(RegisterPath)
+    bus.export("/StatusNotifierWatcher", watcher)
     bus.export("/RuntimeDesktop", DesktopCommands())
     await bus.request_name("org.kde.StatusNotifierWatcher")
     await bus.request_name("org.ednovas.RuntimeDesktop")
