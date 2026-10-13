@@ -73,8 +73,8 @@ in
     assert !(tun.environment.etc ? "xdg/autostart/ednovas-cloud.desktop");
     assert
       proxyAutostart.environment.etc."xdg/autostart/ednovas-cloud.desktop".source
-      == "${appPackage}/share/applications/ednovas-cloud.desktop";
-    assert lib.hasSuffix "/share/applications/ednovas-cloud-tun.desktop"
+      != "${appPackage}/share/applications/ednovas-cloud.desktop";
+    assert lib.hasSuffix "/share/applications/ednovas-cloud.desktop"
       tunAutostart.environment.etc."xdg/autostart/ednovas-cloud.desktop".source;
     pkgs.runCommand "ednovas-privileged-module-checks"
       {
@@ -123,12 +123,25 @@ in
           echo 'Unexpected custom tray or Fontconfig override' >&2
           exit 1
         fi
-        grep -Fx 'Exec=${lib.getExe appPackage} %U' ${
-          proxyAutostart.environment.etc."xdg/autostart/ednovas-cloud.desktop".source
-        }
-        grep -Fx 'Exec=${lib.getExe launcher}' ${
+        python3 - ${proxyAutostart.environment.etc."xdg/autostart/ednovas-cloud.desktop".source} ${
           tunAutostart.environment.etc."xdg/autostart/ednovas-cloud.desktop".source
-        }
+        } <<'PYTHON'
+        import shlex, sys
+        from pathlib import Path
+        for desktopPath, launcherPath, fieldCodes in [
+            (sys.argv[1], '${lib.getExe appPackage}', ['%U']),
+            (sys.argv[2], '${lib.getExe launcher}', []),
+        ]:
+            entry = Path(desktopPath).read_text()
+            command = shlex.split(next(line[5:] for line in entry.splitlines() if line.startswith('Exec=')))
+            assert command[1:] == fieldCodes
+            wrapper = Path(command[0])
+            assert wrapper.is_file() and wrapper.stat().st_mode & 0o111
+            launchCommand = shlex.split(next(line for line in wrapper.read_text().splitlines() if line.startswith('exec ')))
+            assert launchCommand[2] == '-I'
+            assert launchCommand[4:] == [launcherPath, '$@']
+            assert Path(launchCommand[3]).name.endswith('autostart.py')
+        PYTHON
         python3 - ${policy}/share/polkit-1/actions/org.ednovas.cloud.tun.policy <<'PY'
         import sys, shlex, xml.etree.ElementTree as ET
         from pathlib import Path
@@ -152,7 +165,8 @@ in
     pkgs.runCommand "ednovas-privileged-script-checks"
       {
         nativeBuildInputs = [
-          pkgs.python3
+          (pkgs.python3.withPackages (p: [ p.dbus-next ]))
+          pkgs.dbus
           pkgs.bash
           pkgs.jq
           pkgs.gitMinimal

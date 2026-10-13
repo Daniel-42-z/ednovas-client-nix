@@ -61,6 +61,20 @@ let
     categories = [ "Network" ];
     comment = "Run EdNovas GUI and network core as root";
   };
+  autostartPython = pkgs.python3.withPackages (p: [ p.dbus-next ]);
+  autostartLauncher = pkgs.writeShellScript "ednovas-cloud-autostart" ''
+    exec ${autostartPython}/bin/python3 -I ${../../scripts/autostart.py} ${
+      lib.getExe (if cfg.tun.enable then tunLauncher else cfg.package)
+    } "$@"
+  '';
+  autostartDesktop = pkgs.makeDesktopItem {
+    name = "ednovas-cloud";
+    desktopName = "EdNovas Cloud";
+    exec = "${autostartLauncher}${lib.optionalString (!cfg.tun.enable) " %U"}";
+    icon = "${cfg.package}/share/icons/hicolor/2048x2048/apps/ednovas-cloud.png";
+    categories = [ "Network" ];
+    comment = "Start EdNovas after the desktop tray is ready";
+  };
   policy = pkgs.runCommand "ednovas-cloud-polkit-policy" { } ''
     mkdir -p "$out/share/polkit-1/actions"
     cat > "$out/share/polkit-1/actions/${actionId}.policy" <<'POLICY'
@@ -83,6 +97,7 @@ in
     autostart.enable = lib.mkEnableOption "EdNovas Cloud at graphical login" // {
       description = ''
         Start EdNovas Cloud in desktop sessions supporting XDG autostart.
+        Wait for the session tray host, or launch with a warning after 60 seconds.
         When TUN is enabled, start the privileged launcher, which still
         requires group membership and, unless tun.passwordless is enabled,
         administrator authentication.
@@ -117,10 +132,7 @@ in
       { environment.systemPackages = [ cfg.package ]; }
       (lib.mkIf cfg.autostart.enable {
         environment.etc."xdg/autostart/ednovas-cloud.desktop".source =
-          if cfg.tun.enable then
-            "${desktop}/share/applications/ednovas-cloud-tun.desktop"
-          else
-            "${cfg.package}/share/applications/ednovas-cloud.desktop";
+          "${autostartDesktop}/share/applications/ednovas-cloud.desktop";
       })
       (lib.mkIf cfg.tun.enable {
         environment.systemPackages = [

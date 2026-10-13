@@ -69,9 +69,9 @@ The privileged FHS runtime shares the host network and preserves root capabiliti
 | `programs.ednovas-cloud.tun.passwordless` | `false`               |
 | `programs.ednovas-cloud.tun.group`        | `"ednovas-cloud"`     |
 
-Set `autostart.enable = true` to launch at graphical login in desktop sessions supporting XDG autostart. This installs a system-wide entry in `/etc/xdg/autostart/ednovas-cloud.desktop`. With `tun.enable = true`, it starts the privileged TUN launcher and requests administrator authentication unless `tun.passwordless = true`; the logged-in user must belong to `tun.group`. Otherwise, it starts the ordinary proxy launcher. Standalone window managers must run an XDG autostart implementation to use this entry.
+Set `autostart.enable = true` to launch at graphical login in desktop sessions supporting XDG autostart. This installs a system-wide entry in `/etc/xdg/autostart/ednovas-cloud.desktop`. With `tun.enable = true`, it starts the privileged TUN launcher and requests administrator authentication unless `tun.passwordless = true`; the logged-in user must belong to `tun.group`. Otherwise, it starts the ordinary proxy launcher. Autostart waits for the user session’s native StatusNotifier tray host before launching, including before any TUN authentication prompt. If no tray host becomes ready within 60 seconds, it logs a warning and launches anyway. Manual launches remain immediate. Standalone window managers must run an XDG autostart implementation to use this entry.
 
-Custom packages must support `.override { privileged = true; }` and provide `share/applications/ednovas-cloud.desktop` for proxy autostart. The `ednovas-cloud-privileged-runtime` flake package is an internal runtime for the authenticated launcher; use the NixOS module to launch TUN. This branch has no Home Manager module and does not start the app at boot.
+Custom packages must support `.override { privileged = true; }` and expose their launcher through `meta.mainProgram` for proxy autostart. The `ednovas-cloud-privileged-runtime` flake package is an internal runtime for the authenticated launcher; use the NixOS module to launch TUN. This branch has no Home Manager module and does not start the app at boot.
 
 ## Check and update releases
 
