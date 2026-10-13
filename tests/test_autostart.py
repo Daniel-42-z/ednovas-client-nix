@@ -47,6 +47,7 @@ class AutostartTests(unittest.IsolatedAsyncioTestCase):
         self.failures = 0
         self.hang = False
         self.requests = 0
+        self.requestReceived = asyncio.Event()
         self.watcherBus.add_message_handler(self.HandleMessage)
 
     async def asyncTearDown(self):
@@ -65,6 +66,7 @@ class AutostartTests(unittest.IsolatedAsyncioTestCase):
             return None
         self.assertEqual(message.body, ['org.kde.StatusNotifierWatcher', 'IsStatusNotifierHostRegistered'])
         self.requests += 1
+        self.requestReceived.set()
         if self.hang:
             return True
         if self.failures:
@@ -91,12 +93,17 @@ class AutostartTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_watcher_without_host_waits(self):
         await self.RegisterWatcher()
-        waiting = asyncio.create_task(autostart.WaitForTray(timeout=1, pollInterval=0.01))
-        await asyncio.sleep(0.05)
-        self.assertFalse(waiting.done())
-        self.assertGreater(self.requests, 0)
-        self.hostReady = True
-        self.assertTrue(await waiting)
+        waiting = asyncio.create_task(autostart.WaitForTray(timeout=5, pollInterval=0.01))
+        try:
+            await asyncio.wait_for(self.requestReceived.wait(), timeout=2)
+            self.assertFalse(waiting.done())
+            self.assertGreater(self.requests, 0)
+            self.hostReady = True
+            self.assertTrue(await waiting)
+        finally:
+            if not waiting.done():
+                waiting.cancel()
+                await asyncio.gather(waiting, return_exceptions=True)
 
     async def test_transient_property_failure(self):
         await self.RegisterWatcher()
