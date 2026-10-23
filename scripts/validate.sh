@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
-suite=${1:?Use build, x11, wayland, or network}
+suite=${1:?Use build, integration, or network}
 outputPath=${2:-runtime-results/$suite}
 mkdir -p "$outputPath"
 if [[ -n $(find "$outputPath" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
@@ -11,7 +11,7 @@ outputPath=$(realpath "$outputPath")
 if [[ "$suite" == build ]]; then
   nix flake check --print-build-logs 2>&1 | tee "$outputPath/build.log"
 else
-  case "$suite" in x11|wayland|network) ;; *) exit 2 ;; esac
+  case "$suite" in integration|network) ;; *) exit 2 ;; esac
   python3 scripts/runtime-preflight.py 2>&1 | tee "$outputPath/preflight.log"
   driverPath=$(nix build ".#runtime-$suite-driver" --no-link --print-out-paths --print-build-logs 2> >(tee "$outputPath/build.log" >&2))
   # The driver is executed on every run, even when all its builds are cached.

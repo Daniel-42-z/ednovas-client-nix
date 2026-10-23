@@ -25,23 +25,34 @@ let
         runScript = "${appPackage.appimageContents}/resources/bin/${core}";
       }
     );
-  fonts = pkgs.buildFHSEnv (
-    builtins.removeAttrs rootPackage.args [
-      "pname"
-      "src"
-      "contents"
-      "extraInstallCommands"
-      "nativeBuildInputs"
-      "passthru"
-      "meta"
-    ]
-    // {
-      name = "runtime-fonts";
-      runScript = pkgs.writeShellScript "runtime-font-match" ''
-        exec ${pkgs.python3}/bin/python3 -I ${./fonts.py} ${../../scripts/fontconfig.py} "$@"
-      '';
-    }
-  );
+  # Exercise the production FHS settings through the real module launcher,
+  # substituting only the executable. Never start or modify upstream Electron.
+  recordingPackage = lib.makeOverridable (
+    {
+      privileged ? false,
+    }:
+    let
+      productionPackage = appPackage.override { inherit privileged; };
+    in
+    pkgs.buildFHSEnv (
+      builtins.removeAttrs productionPackage.args [
+        "pname"
+        "src"
+        "contents"
+        "extraInstallCommands"
+        "nativeBuildInputs"
+        "passthru"
+        "meta"
+      ]
+      // {
+        name = "runtime-recording${lib.optionalString privileged "-root"}";
+        runScript = pkgs.writeShellScript "runtime-recording-command" ''
+          exec ${testPython}/bin/python3 -I ${./recording.py} "$@"
+        '';
+        meta.mainProgram = "runtime-recording${lib.optionalString privileged "-root"}";
+      }
+    )
+  ) { };
   userFontsConf = pkgs.writeText "runtime-user-fonts.conf" ''
     <fontconfig>
       <dir>${pkgs.noto-fonts-cjk-sans}/share/fonts</dir>
@@ -79,143 +90,101 @@ let
       testPython
     ];
   };
-  Gui =
-    desktop:
-    pkgs.testers.runNixOSTest {
-      name = "ednovas-runtime-${desktop}";
-      qemu.package = pkgs.qemu_kvm;
-      qemu.forceAccel = true;
-      globalTimeout = 1800;
-      extraPythonPackages = p: [ p.pillow ];
-      nodes.machine =
-        { ... }:
-        {
-          imports = [
-            Common
-            module
-          ];
-          config = lib.mkMerge [
-            {
-              programs.ednovas-cloud = {
-                enable = true;
-                package = appPackage;
-                tun.enable = true;
-              };
-              specialisation.passwordless.configuration.programs.ednovas-cloud.tun.passwordless = true;
-              users.users.alice = {
-                isNormalUser = true;
-                uid = 1000;
-                password = "vm-admin-password";
-                extraGroups = [
-                  "wheel"
-                  "ednovas-cloud"
-                ];
-              };
-              users.users.outsider = {
-                isNormalUser = true;
-                uid = 1001;
-                password = "vm-outsider";
-              };
-              security.polkit.extraConfig = lib.mkAfter ''
-                polkit.addAdminRule(function(action, subject) {
-                  return ["unix-user:alice"];
-                });
-              '';
-              # logind starts autovt@tty2, an alias of the template. Overriding
-              # just getty@tty2 does not override that aliased template unit.
-              systemd.services."getty@".serviceConfig.ExecStart = lib.mkForce [
-                ""
-                "${lib.getBin pkgs.util-linux}/bin/agetty --login-program ${pkgs.shadow}/bin/login --autologin outsider --noclear %I linux"
+  integration = pkgs.testers.runNixOSTest {
+    name = "ednovas-runtime-integration";
+    qemu.package = pkgs.qemu_kvm;
+    qemu.forceAccel = true;
+    globalTimeout = 1800;
+    nodes.machine =
+      { ... }:
+      {
+        imports = [
+          Common
+          module
+        ];
+        config = lib.mkMerge [
+          {
+            programs.ednovas-cloud = {
+              enable = true;
+              package = recordingPackage;
+              tun.enable = true;
+            };
+            specialisation.passwordless.configuration.programs.ednovas-cloud.tun.passwordless = true;
+            users.users.alice = {
+              isNormalUser = true;
+              uid = 1000;
+              password = "vm-admin-password";
+              extraGroups = [
+                "wheel"
+                "ednovas-cloud"
               ];
-              virtualisation.memorySize = 4096;
-              hardware.graphics.enable = true;
-              fonts.enableDefaultPackages = false;
-              fonts.packages = lib.mkForce [ pkgs.dejavu_fonts ];
-              # Reproduce Home Manager-only fonts: the system has no CJK or
-              # Nerd Fonts, and a custom font is installed under XDG_DATA_HOME.
-              systemd.tmpfiles.rules = [
-                "d /home/alice/.config 0700 alice users -"
-                "d /home/alice/.config/fontconfig 0700 alice users -"
-                "d /home/alice/.config/fontconfig/conf.d 0700 alice users -"
-                "L+ /home/alice/.config/fontconfig/conf.d/10-hm-fonts.conf - alice users - ${userFontsConf}"
-                "d /home/alice/.local 0700 alice users -"
-                "d /home/alice/.local/share 0700 alice users -"
-                "L+ /home/alice/.local/share/fonts - alice users - ${pkgs.liberation_ttf}/share/fonts"
-              ];
-              environment.systemPackages = [
-                session
-                ui
-                fonts
-                pkgs.fontconfig
-                pkgs.xwininfo
-                pkgs.xdotool
-                pkgs.wmctrl
-                pkgs.xclip
-                pkgs.wl-clipboard
-                (pkgs.tesseract.override {
-                  enableLanguages = [
-                    "eng"
-                    "chi_sim"
-                  ];
-                })
-              ];
-              environment.sessionVariables = {
-                LIBGL_ALWAYS_SOFTWARE = "1";
-                WINIT_X11_SCALE_FACTOR = "1";
-              };
-            }
-            {
-              services.xserver.enable = true;
-              services.xserver.windowManager.openbox.enable = true;
-              services.xserver.displayManager.lightdm.enable = true;
-              services.xserver.resolutions = [
-                {
-                  x = 1280;
-                  y = 720;
-                }
-              ];
-              services.displayManager.defaultSession = "none+openbox";
-              services.displayManager.autoLogin = {
-                enable = true;
-                user = "alice";
-              };
-              services.xserver.displayManager.sessionCommands =
-                if desktop == "x11" then
-                  ''
-                    ${session}/bin/runtime-session &
-                  ''
-                else
-                  ''
-                    # niri's winit backend supports llvmpipe without host GPU access.
-                    LD_LIBRARY_PATH=${
-                      lib.makeLibraryPath [
-                        pkgs.libxcursor
-                        pkgs.libxrandr
-                        pkgs.libxi
-                        pkgs.libx11
-                      ]
-                    } ${pkgs.niri}/bin/niri > /home/alice/niri.log 2>&1 &
-                  '';
-            }
-            (lib.mkIf (desktop == "wayland") {
-              programs.niri = {
-                enable = true;
-                useNautilus = false;
-              };
-              environment.etc."niri/config.kdl".text = ''
-                layout { default-column-width { proportion 0.8; }; }
-                hotkey-overlay { skip-at-startup; }
-                spawn-at-startup "${session}/bin/runtime-session"
-                binds { Mod+Shift+Q { close-window; }; }
-              '';
-            })
-          ];
-        };
-      testScript = ''
-        desktop = ${builtins.toJSON desktop}
-      ''
-      + builtins.readFile ./gui.py;
-    };
+            };
+            users.users.outsider = {
+              isNormalUser = true;
+              uid = 1001;
+              password = "vm-outsider";
+            };
+            security.polkit.extraConfig = lib.mkAfter ''
+              polkit.addAdminRule(function(action, subject) {
+                return ["unix-user:alice"];
+              });
+            '';
+            # logind starts autovt@tty2, an alias of the template. Overriding
+            # just getty@tty2 does not override that aliased template unit.
+            systemd.services."getty@".serviceConfig.ExecStart = lib.mkForce [
+              ""
+              "${lib.getBin pkgs.util-linux}/bin/agetty --login-program ${pkgs.shadow}/bin/login --autologin outsider --noclear %I linux"
+            ];
+            virtualisation.memorySize = 4096;
+            hardware.graphics.enable = true;
+            fonts.enableDefaultPackages = false;
+            fonts.packages = lib.mkForce [ pkgs.dejavu_fonts ];
+            # Reproduce Home Manager-only fonts: the system has no CJK or
+            # Nerd Fonts, and a custom font is installed under XDG_DATA_HOME.
+            systemd.tmpfiles.rules = [
+              "d /home/alice/.config 0700 alice users -"
+              "d /home/alice/.config/fontconfig 0700 alice users -"
+              "d /home/alice/.config/fontconfig/conf.d 0700 alice users -"
+              "L+ /home/alice/.config/fontconfig/conf.d/10-hm-fonts.conf - alice users - ${userFontsConf}"
+              "d /home/alice/.local 0700 alice users -"
+              "d /home/alice/.local/share 0700 alice users -"
+              "L+ /home/alice/.local/share/fonts - alice users - ${pkgs.liberation_ttf}/share/fonts"
+            ];
+            environment.systemPackages = [
+              session
+              ui
+              pkgs.fontconfig
+              pkgs.xwininfo
+              pkgs.xdotool
+              pkgs.wmctrl
+            ];
+          }
+          {
+            services.xserver.enable = true;
+            services.xserver.windowManager.openbox.enable = true;
+            services.xserver.displayManager.lightdm.enable = true;
+            services.xserver.resolutions = [
+              {
+                x = 1280;
+                y = 720;
+              }
+            ];
+            services.displayManager.defaultSession = "none+openbox";
+            services.displayManager.autoLogin = {
+              enable = true;
+              user = "alice";
+            };
+            services.xserver.displayManager.sessionCommands = ''
+              ${session}/bin/runtime-session &
+            '';
+          }
+        ];
+      };
+    testScript = ''
+      recordingCommand = "${lib.getExe recordingPackage}"
+    ''
+    + builtins.readFile ./integration.py;
+  };
   network = pkgs.testers.runNixOSTest {
     name = "ednovas-runtime-network";
     qemu.package = pkgs.qemu_kvm;
@@ -247,7 +216,6 @@ let
   };
 in
 {
-  runtime-x11-driver = (Gui "x11").driver;
-  runtime-wayland-driver = (Gui "wayland").driver;
+  runtime-integration-driver = integration.driver;
   runtime-network-driver = network.driver;
 }

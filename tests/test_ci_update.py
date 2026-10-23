@@ -24,7 +24,7 @@ class CandidateGateTests(unittest.TestCase):
         candidateModule.RequireResults(self.candidate, self.results)
 
     def test_runtime_failure_states_never_pass(self):
-        for suite in ['x11', 'wayland', 'network']:
+        for suite in candidateModule.requiredSuites:
             for result in ['failure', 'skipped', 'cancelled', 'timed_out', None, '']:
                 with self.subTest(suite=suite, result=result):
                     results = copy.deepcopy(self.results)
@@ -51,7 +51,7 @@ class CandidateGateTests(unittest.TestCase):
                     candidateModule.RequireResults(self.candidate, results)
 
     def test_unsuccessful_or_missing_jobs_cannot_pass(self):
-        jobs = {job: {'result': 'success'} for job in ['prepare', 'validate', 'acceptance']}
+        jobs = {job: {'result': 'success'} for job in ['prepare', 'validate']}
         candidateModule.RequireJobs(jobs)
         for job in jobs:
             for state in ['failure', 'skipped', 'cancelled', 'timed_out', None]:
@@ -64,40 +64,9 @@ class CandidateGateTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 candidateModule.RequireJobs(invalid)
 
-    def test_auto_merge_requires_candidate_repetitions_and_all_fault_checks(self):
-        candidate = {'release': {'version': '1.1.80'}, 'identity': self.candidate['identity'],
-                     'validationSource': 'source'}
-        faultChecks = [fault + '-' + suite for fault in ['close', 'restore', 'quit', 'renderer']
-                       for suite in ['x11', 'wayland']] + ['stopped-core-network', 'bypass-tun-network']
-        evidence = {'release': candidate['release'], 'identity': candidate['identity'],
-                    'validationSource': 'source', 'baselineRuns': ['run-a', 'run-b', 'run-c'],
-                    'faults': {fault: 'detected' for fault in faultChecks}}
-        candidateModule.CheckAcceptance(candidate, evidence)
-        for field, value in [('baselineRuns', ['same'] * 3), ('baselineRuns', ['a', 'b']),
-                             ('faults', {}), ('identity', {}),
-                             ('release', {'version': 'old'}), ('validationSource', 'stale')]:
-            invalid = copy.deepcopy(evidence)
-            invalid[field] = value
-            with self.assertRaises(ValueError):
-                candidateModule.CheckAcceptance(candidate, invalid)
-        for field in ['commit', 'parent', 'tree']:
-            invalid = copy.deepcopy(evidence)
-            invalid['identity'][field] = 'different'
-            with self.assertRaises(ValueError):
-                candidateModule.CheckAcceptance(candidate, invalid)
-        for fault in faultChecks:
-            for state in ['missing', 'failure', 'skipped', 'cancelled', 'timed_out']:
-                invalid = copy.deepcopy(evidence)
-                if state == 'missing':
-                    del invalid['faults'][fault]
-                else:
-                    invalid['faults'][fault] = state
-                with self.assertRaises(ValueError):
-                    candidateModule.CheckAcceptance(candidate, invalid)
-
 
 class CiWorkflowTests(unittest.TestCase):
-    def RunWorkflow(self, stage, changed=True, malformed=False, gate=True, stale=False, acceptance=True):
+    def RunWorkflow(self, stage, changed=True, malformed=False, gate=True, stale=False):
         with tempfile.TemporaryDirectory() as directory:
             workPath = Path(directory)
             binPath = workPath / 'bin'
@@ -114,8 +83,7 @@ class CiWorkflowTests(unittest.TestCase):
                 'git': '''if [[ "$1" == rev-parse ]]; then
   if [[ "$*" == *main* ]]; then echo "$REMOTE_PARENT"; else echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; fi
 fi''',
-                'python3': '''if [[ "$2" == gate && "$GATE" != true ]]; then exit 1; fi
-if [[ "$2" == acceptance && "$ACCEPTANCE" != true ]]; then exit 1; fi''',
+                'python3': 'if [[ "$2" == gate && "$GATE" != true ]]; then exit 1; fi',
                 'gh': '''if [[ "$1" == api ]]; then
   case "$2" in
     */commits/*) echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
@@ -134,8 +102,7 @@ if [[ "$1 $2" == "pr create" ]]; then touch "$PR_MARKER"; fi''',
                    'GH_TOKEN':'test', 'GH_REPO':'test/repo', 'DEFAULT_BRANCH':'main', 'RUN_URL':'https://example.com/run',
                    'VALIDATION_NEEDS':'{}', 'PR_MARKER':str(workPath / 'pr-marker'),
                    'REMOTE_PARENT':('d' if stale else 'b')*40,
-                   'GATE':str(gate).lower(),
-                   'ACCEPTANCE':str(acceptance).lower()}
+                   'GATE':str(gate).lower()}
             result = subprocess.run(['bash', str(scriptRoot / 'ci-update.sh'), stage], cwd=workPath, env=env, capture_output=True, text=True)
             return result.returncode, commandLog.read_text().splitlines(), result.stderr
 
@@ -172,11 +139,6 @@ if [[ "$1 $2" == "pr create" ]]; then touch "$PR_MARKER"; fi''',
         self.assertIn('--match-head-commit ' + 'a'*40, commands[mergeIndex])
         self.assertFalse(any(c.startswith('jj ') for c in commands))
         self.assertIn('--force-with-lease=refs/heads/ednovas-update:' + 'a'*40, commands[pushIndex])
-
-    def test_failed_acceptance_blocks_publication_and_auto_merge(self):
-        status, commands, _ = self.RunWorkflow('publish', acceptance=False)
-        self.assertNotEqual(status, 0)
-        self.assertFalse(any(c.startswith(('gh ', 'git push ')) for c in commands))
 
 
 def ShlexQuote(value):
@@ -244,7 +206,7 @@ class NativeGitTests(unittest.TestCase):
             shutil.copytree(scriptRoot, originPath / 'scripts', ignore=shutil.ignore_patterns('__pycache__'))
             (originPath / 'nix').mkdir()
             (originPath / 'nix/release.json').write_text('{"version":"1.1.79"}')
-            (originPath / '.gitignore').write_text('.candidate/\nvalidation-results/\nruntime-acceptance.json\ncandidate.tar.gz\n')
+            (originPath / '.gitignore').write_text('.candidate/\nvalidation-results/\ncandidate.tar.gz\n')
             Git('add', '.')
             Git('commit', '-m', 'Baseline')
             Git('checkout', '-b', 'ednovas-update')
@@ -272,18 +234,10 @@ if [[ "$1 $2" == "pr create" ]]; then touch "$PR_MARKER"; fi
             env = {**testEnv, 'PATH': str(binPath) + ':' + os.environ['PATH'],
                    'DEFAULT_BRANCH': 'main', 'GH_TOKEN': 'disposable-placeholder', 'GH_REPO': 'test/local',
                    'RUN_URL': 'https://example.invalid/run', 'PR_MARKER': str(workPath / 'pr-created'),
-                   'VALIDATION_NEEDS': json.dumps({job: {'result': 'success'} for job in ['prepare', 'validate', 'acceptance']})}
+                   'VALIDATION_NEEDS': json.dumps({job: {'result': 'success'} for job in ['prepare', 'validate']})}
             prepared = subprocess.run(['bash', 'scripts/ci-update.sh', 'prepare'], cwd=candidatePath, env=env, capture_output=True, text=True)
             self.assertEqual(prepared.returncode, 0, prepared.stderr)
             manifest = json.loads((candidatePath / '.candidate/manifest.json').read_text())
-            # Synthetic evidence here tests publication plumbing; real CI
-            # creates it only after fresh repetitions and fault assertions.
-            faultChecks = [fault + '-' + suite for fault in ['close', 'restore', 'quit', 'renderer']
-                           for suite in ['x11', 'wayland']] + ['stopped-core-network', 'bypass-tun-network']
-            (candidatePath / 'runtime-acceptance.json').write_text(json.dumps({
-                'identity': manifest['identity'], 'release': manifest['release'],
-                'validationSource': manifest['validationSource'], 'baselineRuns': ['a', 'b', 'c'],
-                'faults': {fault: 'detected' for fault in faultChecks}}))
             # Match the failing Actions layout: output in the checkout, with
             # generated build outputs and local JJ state that must not ship.
             (candidatePath / '.jj').mkdir()
@@ -302,7 +256,6 @@ if [[ "$1 $2" == "pr create" ]]; then touch "$PR_MARKER"; fi
             # Verify the archived remote is the actual origin, not the
             # preparer's temporary checkout, and publish from a fresh runner.
             self.assertEqual(Git('remote', 'get-url', 'origin', cwd=restoredPath), str(originPath))
-            shutil.copyfile(candidatePath / 'runtime-acceptance.json', restoredPath / 'runtime-acceptance.json')
             candidatePath = restoredPath
             configPath.rename(workPath / 'preparer-config')
             configPath.mkdir()

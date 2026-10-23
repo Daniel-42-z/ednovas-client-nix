@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [build, x11, wayland, network]
+        suite: [build, integration, network]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -106,7 +106,7 @@ jobs:
           python3 - <<'PY'
           import json
           from pathlib import Path
-          required = {'build', 'x11', 'wayland', 'network'}
+          required = {'build', 'integration', 'network'}
           results = {}
           for path in Path('evidence').glob('*/validation-results/*.json'):
               if path.stem in results:

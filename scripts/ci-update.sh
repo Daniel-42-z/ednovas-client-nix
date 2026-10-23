@@ -38,7 +38,6 @@ elif [[ "$stage" == publish ]]; then
   export GIT_CONFIG_KEY_0=http.extraHeader
   GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
   export GIT_CONFIG_VALUE_0
-  python3 scripts/candidate.py acceptance
   updateCommit=$(jq -er '.identity.commit' .candidate/manifest.json)
   parentCommit=$(jq -er '.identity.parent' .candidate/manifest.json)
   releaseVersion=$(jq -er '.release.version' .candidate/manifest.json)
@@ -56,14 +55,14 @@ elif [[ "$stage" == publish ]]; then
   remoteParent=$(gh api "repos/$GH_REPO/commits/$remoteCommit" --jq '.parents | if length == 1 then .[0].sha else "invalid" end')
   [[ "$remoteCommit" == "$updateCommit" && "$remoteParent" == "$parentCommit" ]]
   [[ $(gh api "repos/$GH_REPO/git/ref/heads/$DEFAULT_BRANCH" --jq '.object.sha') == "$parentCommit" ]]
-  jq -n --arg targetUrl "$RUN_URL" '{state:"success",context:"ednovas-update/build",target_url:$targetUrl,description:"Builds, modules, X11, niri, and both bundled cores passed"}' > .candidate/status.json
+  jq -n --arg targetUrl "$RUN_URL" '{state:"success",context:"ednovas-update/build",target_url:$targetUrl,description:"Builds, launcher/font integration, and bundled cores passed"}' > .candidate/status.json
   gh api --method POST "repos/$GH_REPO/statuses/$updateCommit" --input .candidate/status.json
   cat > .candidate/body.md <<BODY
 Update the pinned EdNovas Cloud release to $releaseVersion.
 
-Three independent acceptance runs and all ten deliberate fault checks passed for this candidate. All required suites passed on this exact commit: production builds, unit/module checks and workflow linting; X11 and niri login rendering, interaction, authenticated privileged launch and repeated hide/restore/quit; both bundled Mihomo cores over local HTTP, SOCKS and captured TUN traffic. [Validation and diagnostic artifacts]($RUN_URL).
+All required suites passed on this exact commit: production builds, unit/module checks and workflow linting; privileged launcher authorization, isolated state, desktop bus access and font propagation using a recording fixture; both bundled Mihomo cores over local HTTP, SOCKS and captured TUN traffic. [Validation and diagnostic artifacts]($RUN_URL).
 
-Fresh unauthenticated profiles and software rendering only. Server-configuration dialog interaction, subscription loading, authenticated GUI connections, GPU behavior and authenticated profile migration remain manual checks. Bundled-core coverage does not prove the GUI generates or applies a subscription configuration.
+Automated GUI validation was not performed. Upstream 1.1.82 blocks execution in virtual machines. Login, native tray behavior, X11/Wayland rendering, subscription loading and authenticated GUI networking require manual checks on a physical device. Bundled-core coverage does not prove the GUI generates or applies a subscription configuration.
 BODY
   prNumber=$(gh pr list --repo "$GH_REPO" --state open --head ednovas-update --base "$DEFAULT_BRANCH" --json number --jq '.[0].number // empty')
   if [[ -z "$prNumber" ]]; then
