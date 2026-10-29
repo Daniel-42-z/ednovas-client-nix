@@ -1,9 +1,9 @@
 {
-  "version": "1.1.85",
+  "version": "1.1.88",
   "sources": {
     "x86_64-linux": {
-      "url": "https://storage.ednovas.org/desktop/1.1.85/EdNovas-Cloud-1.1.85-Linux-x86_64.AppImage",
-      "hash": "sha256-n7jZi2Lr+zlLBMS18SXNJxkf1aefW7uT7BOLQ2mCJZo=",
+      "url": "https://storage.ednovas.org/desktop/1.1.88/EdNovas-Cloud-1.1.88-Linux-x86_64.AppImage",
+      "hash": "sha256-CPdOLWt2AMw9cSIr+/5jd5T50EX/JsWDjQNjUyHDvFQ=",
       "appImageArchitecture": "x86_64"
     }
   }
